@@ -101,6 +101,7 @@ def main():
         ("requests", "HTTP İstemcisi"),
         ("PIL", "Görüntü İşleme (Pillow)"),
         ("numpy", "Sayısal Hesaplama"),
+        ("mediapipe", "Akıllı El/Engel Tespiti"),
     ]
 
     for modul_adi, aciklama in paketler:

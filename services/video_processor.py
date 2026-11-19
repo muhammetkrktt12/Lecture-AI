@@ -14,6 +14,7 @@ Temel Kurallar:
 """
 
 import os
+import sys
 import re
 import shutil
 import subprocess
@@ -38,6 +39,32 @@ class VideoProcessor:
         self.frames_dizini = Path(frames_dizini) if frames_dizini else FRAMES_DIR
         self.frames_dizini.mkdir(parents=True, exist_ok=True)
         self.ffmpeg_yolu = self._ffmpeg_bul()
+        self._hand_detector = None
+        self._hand_detector_initialized = False
+
+    def _get_hand_detector(self):
+        """MediaPipe HandLandmarker detektörünü (lazy-loaded) başlatır."""
+        if getattr(self, "_hand_detector_initialized", False):
+            return self._hand_detector
+        self._hand_detector_initialized = True
+        try:
+            import mediapipe as mp
+            from mediapipe.tasks import python
+            from mediapipe.tasks.python import vision
+
+            model_path = ROOT / "data" / "models" / "hand_landmarker.task"
+            if not model_path.exists():
+                import urllib.request
+                model_path.parent.mkdir(parents=True, exist_ok=True)
+                url = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+                urllib.request.urlretrieve(url, str(model_path))
+
+            base_options = python.BaseOptions(model_asset_path=str(model_path))
+            options = vision.HandLandmarkerOptions(base_options=base_options, num_hands=2)
+            self._hand_detector = vision.HandLandmarker.create_from_options(options)
+        except Exception:
+            self._hand_detector = None
+        return self._hand_detector
 
     def _ffmpeg_bul(self) -> Optional[str]:
         """Sistemde FFmpeg ikili dosyasını bulur."""
@@ -170,6 +197,8 @@ class VideoProcessor:
             from PIL import Image
             import numpy as np
 
+            hand_detector = self._get_hand_detector()
+
             def _engel_orani(img_p: str) -> float:
                 im = Image.open(img_p).convert('RGB')
                 arr = np.array(im, dtype=int)
@@ -178,6 +207,34 @@ class VideoProcessor:
                 h, w = arr.shape[:2]
                 slide_area = skin[int(h*0.15):int(h*0.85), int(w*0.1):int(w*0.9)]
                 return slide_area.sum() / slide_area.size
+
+            def _engel_ve_el_skoru(img_p: str) -> tuple[float, int, bool]:
+                """
+                MediaPipe HandLandmarker ve renk analizini birleştirerek kesin engel skoru üretir.
+                Döner: (toplam_skor, el_sayisi, el_tahtayi_kapatiyor_mu)
+                """
+                el_sayisi = 0
+                el_kapatiyor = False
+                el_cezasi = 0.0
+
+                if hand_detector is not None:
+                    try:
+                        import mediapipe as mp
+                        mp_img = mp.Image.create_from_file(img_p)
+                        res = hand_detector.detect(mp_img)
+                        if res.hand_landmarks:
+                            el_sayisi = len(res.hand_landmarks)
+                            min_y = min([lm.y for h in res.hand_landmarks for lm in h])
+                            # El tahtanın içerik bölgesinde mi (ekranın alt %12'sinden yukarı uzanıyor mu?)
+                            if min_y < 0.88:
+                                el_kapatiyor = True
+                                el_cezasi = 0.50 + el_sayisi * 0.25 + max(0.0, (0.88 - min_y) * 0.5)
+                    except Exception:
+                        pass
+
+                renk_orani = _engel_orani(img_p)
+                toplam_skor = el_cezasi + renk_orani
+                return toplam_skor, el_sayisi, el_kapatiyor
 
             is_first_video = "1EPox1m2MPQ" in str(video_yolu) or "Elektrik Kaynakları" in str(video_yolu)
             is_arac_gerecler = "J9_yr257Jog" in str(video_yolu) or "Elektrikli Araç" in str(video_yolu)
@@ -258,13 +315,13 @@ class VideoProcessor:
             if not test_path or not os.path.exists(test_path):
                 return varsayilan_kare_sn
 
-            varsayilan_engel = _engel_orani(test_path)
+            varsayilan_skor, el_sayisi, el_kapatiyor = _engel_ve_el_skoru(test_path)
             varsayilan_mukerrer = _oncekiyle_ayni_mi(test_path)
             varsayilan_reklam = _reklam_kitabi_mi(test_path, varsayilan_kare_sn)
             varsayilan_outro = _abone_ol_outro_mu(test_path, varsayilan_kare_sn)
 
-            # Eğer varsayılan kare hem mükerrer/reklam/outro değilse hem de engelsizse doğrudan kullan
-            if not varsayilan_mukerrer and not varsayilan_reklam and not varsayilan_outro and varsayilan_engel <= 0.09:
+            # Eğer varsayılan kare hem mükerrer/reklam/outro değilse hem de el engeli yoksa doğrudan kullan
+            if not varsayilan_mukerrer and not varsayilan_reklam and not varsayilan_outro and not el_kapatiyor and varsayilan_skor <= 0.09:
                 return varsayilan_kare_sn
 
             if varsayilan_reklam:
@@ -273,8 +330,10 @@ class VideoProcessor:
                 print(f"[VideoProcessor] Bölüm {idx}: 'Abone Ol' outro ekranı tespit edildi, filtreleniyor...")
             elif varsayilan_mukerrer:
                 print(f"[VideoProcessor] Bölüm {idx}: Varsayılan kare önceki bölümlerle mükerrer çıktı! Alternatif temiz slayt taranıyor...")
-            elif varsayilan_engel > 0.07:
-                print(f"[VideoProcessor] Bölüm {idx}: Slayt üzerinde el/engel tespit edildi (%{varsayilan_engel*100:.1f}). Temiz kare taranıyor...")
+            elif el_kapatiyor:
+                print(f"[VideoProcessor] Bölüm {idx}: MediaPipe ile tahtayı kapatan {el_sayisi} el tespit edildi (Skor: {varsayilan_skor:.2f}). Temiz kare taranıyor...")
+            elif varsayilan_skor > 0.07:
+                print(f"[VideoProcessor] Bölüm {idx}: Slayt üzerinde el/engel tespit edildi (Skor: %{varsayilan_skor*100:.1f}). Temiz kare taranıyor...")
 
             adaylar = [varsayilan_kare_sn]
             for offset in [2.0, -2.0, 4.0, -4.0, 6.0, -6.0, 8.0, -8.0, 10.0, -10.0, 12.0, -12.0, 16.0, -16.0]:
@@ -295,15 +354,15 @@ class VideoProcessor:
                         continue # 'Abone Ol!' outro içeren kareleri ele
                     if _oncekiyle_ayni_mi(cand_p):
                         continue # Önceki slaytla mükerrer olan adayları ele
-                    e_orani = _engel_orani(cand_p)
-                    if e_orani < en_dusuk_engel:
-                        en_dusuk_engel = e_orani
+                    cand_skor, cand_el, cand_kapatiyor = _engel_ve_el_skoru(cand_p)
+                    if cand_skor < en_dusuk_engel:
+                        en_dusuk_engel = cand_skor
                         en_iyi_t = t
-                    if e_orani <= 0.035:
-                        print(f" -> Temiz ve özgün kare bulundu: {t}s (Engel: %{e_orani*100:.2f})")
+                    if not cand_kapatiyor and cand_skor <= 0.04:
+                        print(f" -> MediaPipe onaylı temiz ve özgün kare bulundu: {t}s (El: {cand_el}, Skor: {cand_skor:.3f})")
                         return t
 
-            print(f" -> En temiz ve özgün kare seçildi: {en_iyi_t}s (Engel: %{en_dusuk_engel*100:.2f})")
+            print(f" -> En temiz ve özgün kare seçildi: {en_iyi_t}s (Engel Skoru: {en_dusuk_engel:.3f})")
             return en_iyi_t
         except Exception as e:
             print(f"[UYARI] Akıllı kare seçimi hatası: {e}")
@@ -375,34 +434,314 @@ class VideoProcessor:
     def otomatik_ekran_degisimlerini_bul(
         self,
         video_yolu: str,
-        ornekleme_adimi: float = 4.0,
-        esik_degeri: float = 0.08,
+        ornekleme_adimi: float = 2.5,
+        ssim_esigi: float = 0.58,
         min_materyal_suresi: float = 16.0
     ) -> List[Dict[str, Any]]:
         """
         Videoyu baştan sona tarayarak ekrandaki anlamlı görsel materyal değişimlerini tespit eder.
-        Küçük animasyonları ve el/imleç hareketlerini filtreleyip kararlı slayt aralıklarını döndürür.
+        SSIM (Yapısal Benzerlik) analizi ile slayt değişimlerini yakalar; öğretmen hareketlerini
+        ve el jestlerini aynı materyal olarak korur.
+        Tespit edilen her materyal için MediaPipe destekli en temiz ve engelsiz kareyi çıkarır.
         """
-        if not os.path.exists(video_yolu) or not self.ffmpeg_yolu:
+        if not os.path.exists(video_yolu):
+            print(f"[UYARI] Video dosyası bulunamadı: {video_yolu}")
             return []
 
-        # Video süresini tespit et
-        toplam_sure = 546.0
-        try:
-            cmd = [self.ffmpeg_yolu, "-i", video_yolu]
-            proc = subprocess.run(cmd, stderr=subprocess.PIPE, text=True, errors="ignore")
-            for line in proc.stderr.split("\n"):
-                if "Duration:" in line:
-                    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", line)
-                    if match:
-                        h, m, s = match.groups()
-                        toplam_sure = float(h) * 3600 + float(m) * 60 + float(s)
-                    break
-        except Exception as e:
-            print(f"[UYARI] Video süresi alınamadı: {e}")
+        import cv2
+        import numpy as np
 
-        print(f"[VideoProcessor] Video süresi: {toplam_sure:.1f} sn. Ekran değişim analizi yapılıyor...")
-        return []
+        cap = cv2.VideoCapture(str(video_yolu))
+        if not cap.isOpened():
+            print(f"[HATA] Video dosyası açılamadı: {video_yolu}")
+            return []
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        toplam_sure = frame_count / fps if fps > 0 else 540.0
+
+        print(f"\n[VideoProcessor] Video Analizi Başlıyor: {Path(video_yolu).name} (Süre: {toplam_sure:.1f}s, FPS: {fps:.2f})")
+        print(f"[VideoProcessor] Slayt Değişimi Taraması (Örnekleme: {ornekleme_adimi}s, SSIM Eşiği: {ssim_esigi}, Min Süre: {min_materyal_suresi}s)...")
+
+        def _hesapla_ssim(img1: np.ndarray, img2: np.ndarray) -> float:
+            C1 = (0.01 * 255) ** 2
+            C2 = (0.03 * 255) ** 2
+            im1 = img1.astype(float)
+            im2 = img2.astype(float)
+            mu1 = cv2.GaussianBlur(im1, (11, 11), 1.5)
+            mu2 = cv2.GaussianBlur(im2, (11, 11), 1.5)
+            mu1_sq = mu1 ** 2
+            mu2_sq = mu2 ** 2
+            mu1_mu2 = mu1 * mu2
+            sigma1_sq = cv2.GaussianBlur(im1 ** 2, (11, 11), 1.5) - mu1_sq
+            sigma2_sq = cv2.GaussianBlur(im2 ** 2, (11, 11), 1.5) - mu2_sq
+            sigma12 = cv2.GaussianBlur(im1 * im2, (11, 11), 1.5) - mu1_mu2
+            ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+            return float(np.mean(ssim_map))
+
+        # 1. Aşama: Slayt Geçiş Noktalarını Belirleme
+        gecis_noktalari = [0.0]
+        anchor_gray = None
+        anchor_t = 0.0
+        t = 0.0
+
+        while t < toplam_sure:
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            small_gray = cv2.cvtColor(cv2.resize(frame, (160, 90)), cv2.COLOR_BGR2GRAY)
+            if anchor_gray is None:
+                anchor_gray = small_gray
+                anchor_t = t
+            else:
+                score = _hesapla_ssim(anchor_gray, small_gray)
+                # Eğer mevcut kare ile ana slayt arasındaki benzerlik belirgin şekilde düştüyse ve asgari süre dolduysa:
+                if score < ssim_esigi and (t - anchor_t) >= min_materyal_suresi:
+                    gecis_noktalari.append(round(t, 1))
+                    anchor_gray = small_gray
+                    anchor_t = t
+
+            t += ornekleme_adimi
+
+        cap.release()
+
+        # Son bitiş saniyesini ekle
+        if gecis_noktalari[-1] < toplam_sure - 5.0:
+            gecis_noktalari.append(round(toplam_sure, 1))
+
+        print(f"[VideoProcessor] Toplam {len(gecis_noktalari)-1} dinamik eğitim materyali aralığı tespit edildi.")
+
+        # 2. Aşama: Her Aralık İçin MediaPipe ile En Temiz Kareyi Alma ve Bölüm Oluşturma
+        bolumler: List[Dict[str, Any]] = []
+        onceki_kareler: List[str] = []
+
+        for idx in range(len(gecis_noktalari) - 1):
+            baslangic_sn = gecis_noktalari[idx]
+            bitis_sn = gecis_noktalari[idx + 1]
+            varsayilan_kare = round((baslangic_sn + bitis_sn) / 2.0, 1)
+
+            # MediaPipe + engel analizi ile en temiz kareyi bul
+            temiz_kare_sn = self._en_temiz_kare_zamani_bul(
+                video_yolu=video_yolu,
+                baslangic=baslangic_sn,
+                bitis=bitis_sn,
+                varsayilan_kare_sn=varsayilan_kare,
+                idx=idx + 1,
+                onceki_kare_yollari=onceki_kareler
+            )
+
+            # Ekran görüntüsü al
+            dosya_adi = f"bolum_{idx+1:02d}_{int(temiz_kare_sn):04d}s.jpg"
+            kare_yolu = self.kare_yakala(video_yolu, temiz_kare_sn, cikti_dosya_adi=dosya_adi)
+            if kare_yolu:
+                onceki_kareler.append(kare_yolu)
+
+            baslangic_str = self.saniyeden_zaman_damgasi(baslangic_sn)
+            bitis_str = self.saniyeden_zaman_damgasi(bitis_sn)
+            zaman_metni = f"{baslangic_str} – {bitis_str}"
+
+            bolum_verisi = {
+                "bolum_no": idx + 1,
+                "bolum_basligi": f"Bölüm {idx + 1} – Görsel Eğitim Materyali",
+                "zaman_araligi": {
+                    "baslangic": baslangic_str,
+                    "bitis": bitis_str,
+                    "baslangic_saniye": baslangic_sn,
+                    "bitis_saniye": bitis_sn,
+                    "kare_zamani": temiz_kare_sn,
+                },
+                "zaman_araligi_metni": zaman_metni,
+                "ekran_goruntusu_yolu": kare_yolu,
+                "transkript": "",
+                "pedagojik_anlatim": "",
+                "onemli_kavramlar": [],
+                "kitap_referansi": "",
+            }
+            bolumler.append(bolum_verisi)
+
+        # 3. Aşama: Aynı Materyale Ait Alt Aralıkları Birleştirme (SSIM > 0.52)
+        if len(bolumler) > 1:
+            birlestirilmis: List[Dict[str, Any]] = []
+            curr = bolumler[0]
+
+            for nxt in bolumler[1:]:
+                ayni_slayt = False
+                curr_p = curr.get("ekran_goruntusu_yolu")
+                nxt_p = nxt.get("ekran_goruntusu_yolu")
+                if curr_p and nxt_p and os.path.exists(curr_p) and os.path.exists(nxt_p):
+                    try:
+                        im1 = cv2.cvtColor(cv2.resize(cv2.imread(curr_p), (160, 90)), cv2.COLOR_BGR2GRAY)
+                        im2 = cv2.cvtColor(cv2.resize(cv2.imread(nxt_p), (160, 90)), cv2.COLOR_BGR2GRAY)
+                        sc = _hesapla_ssim(im1, im2)
+                        if sc > 0.52:
+                            ayni_slayt = True
+                    except Exception:
+                        pass
+
+                # Eğer aynı slaytsa aralıkları birleştir
+                if ayni_slayt:
+                    curr["zaman_araligi"]["bitis"] = nxt["zaman_araligi"]["bitis"]
+                    curr["zaman_araligi"]["bitis_saniye"] = nxt["zaman_araligi"]["bitis_saniye"]
+                    curr["zaman_araligi_metni"] = f"{curr['zaman_araligi']['baslangic']} – {nxt['zaman_araligi']['bitis']}"
+                else:
+                    birlestirilmis.append(curr)
+                    curr = nxt
+            birlestirilmis.append(curr)
+
+            # Bölüm numaralarını yeniden diz
+            for idx, b in enumerate(birlestirilmis, 1):
+                b["bolum_no"] = idx
+                b["bolum_basligi"] = f"Bölüm {idx} – Görsel Eğitim Materyali"
+
+            bolumler = birlestirilmis
+
+        print(f"[VideoProcessor] Materyal birleştirme sonrası nihai bölüm sayısı: {len(bolumler)}")
+        return bolumler
+
+    @staticmethod
+    def _cuda_ortamini_hazirla():
+        """CTranslate2 / faster-whisper için NVIDIA cuBLAS ve cuDNN DLL yollarını PATH'e ekler."""
+        try:
+            from sysconfig import get_path
+            cuda_paketleri = Path(get_path("purelib")) / "nvidia"
+            cuda_dizinleri = [
+                str(cuda_dizini)
+                for paket in ("cublas", "cudnn")
+                if (cuda_dizini := cuda_paketleri / paket / "bin").is_dir()
+            ]
+            if os.name == "nt" and cuda_dizinleri:
+                os.environ["PATH"] = os.pathsep.join(
+                    [*cuda_dizinleri, os.environ.get("PATH", "")]
+                )
+        except Exception:
+            pass
+
+    def transkript_olustur(
+        self,
+        video_yolu: Any,
+        model_boyutu: str = "small",
+        zorla_yeniden: bool = False,
+    ) -> Path:
+        """
+        faster-whisper ile videonun konuşma transkriptini GPU (CUDA) hızlandırmasıyla çıkarır.
+        Sonucu video_yolu.transkript.txt dosyasına kaydeder ve döndürür.
+        Önceden oluşturulmuş dosya varsa doğrudan önbellekten kullanır.
+        """
+        video_p = Path(video_yolu)
+        cikti_p = video_p.with_suffix(".transkript.txt")
+
+        if cikti_p.exists() and not zorla_yeniden:
+            print(f"[VideoProcessor] Mevcut transkript dosyası bulundu (önbellek): {cikti_p.name}")
+            return cikti_p
+
+        print(f"[VideoProcessor] Whisper transkripsiyonu başlatılıyor ({video_p.name}, model={model_boyutu})...")
+        self._cuda_ortamini_hazirla()
+        from faster_whisper import WhisperModel
+
+        try:
+            model = WhisperModel(model_boyutu, device="cuda", compute_type="float16")
+        except Exception as e:
+            print(f"[UYARI] CUDA ile Whisper başlatılamadı ({e}), CPU moduna geçiliyor...")
+            model = WhisperModel(model_boyutu, device="cpu", compute_type="int8")
+
+        parcalar, _ = model.transcribe(
+            str(video_p),
+            language="tr",
+            vad_filter=True,
+        )
+
+        with cikti_p.open("w", encoding="utf-8") as dosya:
+            for parca in parcalar:
+                metin = parca.text.strip()
+                if metin:
+                    dosya.write(f"[{parca.start:.2f} - {parca.end:.2f}] {metin}\n")
+
+        print(f"[VideoProcessor] Transkript başarıyla oluşturuldu ve kaydedildi: {cikti_p.name}")
+        return cikti_p
+
+    def transkript_ile_eslestir(
+        self,
+        bolumler: List[Dict[str, Any]],
+        transkript_kaynagi: Any,
+    ) -> List[Dict[str, Any]]:
+        """
+        Dinamik olarak tespit edilen görsel materyal bölümlerini,
+        Whisper zaman damgalı transkript parçalarıyla birebir eşleştirir.
+        transkript_kaynagi doğrudan video yolu (.mp4) veya transkript dosyası (.txt) olabilir.
+        """
+        # Eğer doğrudan video dosyası verilmişse transkript oluştur veya önbellekten al
+        if isinstance(transkript_kaynagi, (str, Path)):
+            kaynak_p = Path(transkript_kaynagi)
+            if kaynak_p.suffix.lower() in [".mp4", ".mkv", ".mov", ".avi", ".webm"]:
+                transkript_kaynagi = self.transkript_olustur(kaynak_p)
+
+        satirlar: List[Tuple[float, float, str]] = []
+
+        if isinstance(transkript_kaynagi, (str, Path)) and os.path.exists(str(transkript_kaynagi)):
+            with open(str(transkript_kaynagi), "r", encoding="utf-8") as f:
+                for line in f:
+                    m = re.match(r"\[(\d+\.?\d*)\s*-\s*(\d+\.?\d*)\]\s*(.*)", line.strip())
+                    if m:
+                        st, et, txt = float(m.group(1)), float(m.group(2)), m.group(3).strip()
+                        satirlar.append((st, et, txt))
+        elif isinstance(transkript_kaynagi, list):
+            for item in transkript_kaynagi:
+                if isinstance(item, dict):
+                    st = float(item.get("start", 0.0))
+                    et = float(item.get("end", 0.0))
+                    txt = str(item.get("text", "")).strip()
+                    satirlar.append((st, et, txt))
+                elif hasattr(item, "start") and hasattr(item, "end") and hasattr(item, "text"):
+                    satirlar.append((float(item.start), float(item.end), str(item.text).strip()))
+
+        if not satirlar:
+            print("[VideoProcessor] Eşleştirilecek transkript verisi bulunamadı.")
+            return bolumler
+
+        print(f"[VideoProcessor] {len(satirlar)} Whisper parçası {len(bolumler)} görsel bölüme dağıtılıyor...")
+
+        for b in bolumler:
+            b_sn_start = float(b["zaman_araligi"].get("baslangic_saniye", 0.0))
+            b_sn_end = float(b["zaman_araligi"].get("bitis_saniye", 99999.0))
+
+            uygun_metinler: List[str] = []
+            ilk_konusma_sn: Optional[float] = None
+            son_konusma_sn: Optional[float] = None
+
+            for st, et, txt in satirlar:
+                # Transkript parçası bu bölümün zaman penceresine denk geliyor mu?
+                if (b_sn_start - 1.0) <= st < b_sn_end:
+                    uygun_metinler.append(txt)
+                    if ilk_konusma_sn is None:
+                        ilk_konusma_sn = st
+                    son_konusma_sn = et
+
+            if uygun_metinler:
+                b["transkript"] = " ".join(uygun_metinler)
+                if ilk_konusma_sn is not None and son_konusma_sn is not None:
+                    b["konusma_zaman_araligi"] = f"[{ilk_konusma_sn:.2f} - {son_konusma_sn:.2f}]"
+            else:
+                b["transkript"] = ""
+                b["konusma_zaman_araligi"] = f"[{b_sn_start:.2f} - {b_sn_end:.2f}]"
+
+        # Eğer son bölüm tamamen YouTube abone ol/like kapanışından ibaretse ve ders içeriği yoksa elenir:
+        if len(bolumler) > 1:
+            son = bolumler[-1]
+            txt_son = son.get("transkript", "").lower()
+            if any(w in txt_son for w in ["abone ol", "like tuş", "ödüllü soru", "ödüllü sayfa"]) and len(txt_son) < 300:
+                ders_kelimeleri = ["enerji", "elektrik", "kaynak", "devre", "batarya", "akü", "santral", "besin", "fırın", "çamaşır"]
+                if not any(k in txt_son for k in ders_kelimeleri):
+                    print(f"[VideoProcessor] Video sonundaki saf YouTube outro ekranı ({son['zaman_araligi_metni']}) elendi.")
+                    bolumler.pop()
+
+        # Bölüm numaralarını ve başlıklarını garantiye al
+        for idx, b in enumerate(bolumler, 1):
+            b["bolum_no"] = idx
+            b["bolum_basligi"] = f"Bölüm {idx} – Görsel Eğitim Materyali"
+
+        return bolumler
 
 
 if __name__ == "__main__":
