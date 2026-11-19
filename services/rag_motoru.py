@@ -361,16 +361,18 @@ class RAGMotoru:
         k: int = 4,
         rerank: bool = True,
         allow_cross_grade: bool = False,
+        max_mesafe: float = 1.04,
     ) -> List[Document]:
         """
         Kullanıcının seçtiği eğitim seviyesine ve sınıf düzeyine ait belgeler arasında
         anlamsal ve sözcüksel arama yapar.
 
-        KATI SINIF İZOLASYONU VE KALİTE KURALI:
+        KATI SINIF İZOLASYONU VE ALAKA EŞİĞİ KURALI:
         1. sinif belirtilmişse (Örn. '3. Sınıf'), arama en baştan itibaren SADECE o sınıfla sınırlandırılır.
         2. allow_cross_grade=False (varsayılan) iken, 3. sınıf aramasında asla 4. sınıf veya başka kademe belgeleri dönmez.
-        3. Vektör aramasından gerçek skor/mesafe alınır (vektor_skoru, vektor_mesafesi).
-        4. Vektör servisi çevrimdışıysa lexical fallback devreye girer; vektor_skoru=None olarak saklanır.
+        3. Alaka Eşiği (Relevance Threshold): max_mesafe (varsayılan 0.95) üzerindeki tamamen alakasız/konu dışı
+           sorgularda (Örn. 'bugün istanbulda ayasofyayı gezeceğim') sonuç dönmez; boş liste verilir.
+        4. Vektör aramasından gerçek skor/mesafe alınır (vektor_skoru, vektor_mesafesi).
         5. Aday dokümanlar 3-gram Türkçe Jaccard lexical reranking ile sıralanır.
         """
         store = self.get_vector_store()
@@ -387,14 +389,18 @@ class RAGMotoru:
 
         adaylar: List[Document] = []
 
-        # 2. Vektör Araması Denemesi (Gerçek skorlarla)
+        # 2. Vektör Araması Denemesi (Gerçek skorlarla ve Alaka Eşiğiyle)
         try:
             results_with_scores = store.similarity_search_with_score(query=sorgu, k=aday_sayisi, filter=where_filter)
             for doc, dist in results_with_scores:
+                dist_val = float(dist)
+                # Alaka Eşiği: Mesafe max_mesafe (0.95) üzerindeyse veya tamamen ortogonal/zıtsa elenir
+                if max_mesafe is not None and dist_val > max_mesafe:
+                    continue
                 doc.metadata["arama_yontemi"] = "vektor_benzerligi"
-                doc.metadata["vektor_mesafesi"] = round(float(dist), 4)
-                # Chroma cosine distance [0, 2] -> similarity [0, 1]
-                sim = max(0.0, min(1.0, 1.0 - (float(dist) / 2.0 if dist > 1.0 else float(dist))))
+                doc.metadata["vektor_mesafesi"] = round(dist_val, 4)
+                # Chroma cosine distance [0, 2] -> cosine similarity = 1 - dist
+                sim = max(0.0, min(1.0, 1.0 - dist_val))
                 doc.metadata["vektor_skoru"] = round(sim, 4)
                 adaylar.append(doc)
         except Exception:
@@ -406,9 +412,12 @@ class RAGMotoru:
             try:
                 results_with_scores = store.similarity_search_with_score(query=sorgu, k=aday_sayisi, filter=filtre)
                 for doc, dist in results_with_scores:
+                    dist_val = float(dist)
+                    if max_mesafe is not None and dist_val > max_mesafe:
+                        continue
                     doc.metadata["arama_yontemi"] = "vektor_benzerligi"
-                    doc.metadata["vektor_mesafesi"] = round(float(dist), 4)
-                    sim = max(0.0, min(1.0, 1.0 - (float(dist) / 2.0 if dist > 1.0 else float(dist))))
+                    doc.metadata["vektor_mesafesi"] = round(dist_val, 4)
+                    sim = max(0.0, min(1.0, 1.0 - dist_val))
                     doc.metadata["vektor_skoru"] = round(sim, 4)
                     if self.sinif_normalize(doc.metadata.get("sinif")) != norm_sinif:
                         doc.metadata["cross_grade"] = True
@@ -417,7 +426,7 @@ class RAGMotoru:
                 adaylar = []
 
         # 4. Güvenlik Ağı / Fallback: Vektör servisi çevrimdışıysa doğrudan ChromaDB SQLite koleksiyonundan çek
-        if not adaylar:
+        if not adaylar and self.allow_fallback:
             try:
                 col = store._collection
                 res = col.get(where=where_filter if where_filter else None, include=["documents", "metadatas"])

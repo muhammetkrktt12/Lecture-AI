@@ -164,8 +164,15 @@ def rag_baglam_dugumu(state: EduFrameState) -> Dict[str, Any]:
     video_basligi = video_bilgisi.get("title", "Fen Bilimleri Dersi")
 
     rag = RAGMotoru()
-    # Başlığa ve konuya göre seviye filtreli içerik çek
-    docs = rag.seviye_filtreli_arama(sorgu=video_basligi, egitim_seviyesi=seviye, k=4)
+    sinif = state.get("sinif_duzeyi") or "3. Sınıf"
+    # Başlığa ve konuya göre seviye filtreli içerik çek (Sınıf İzolasyonu korumalı)
+    docs = rag.seviye_filtreli_arama(
+        sorgu=video_basligi,
+        egitim_seviyesi=seviye,
+        sinif=sinif,
+        allow_cross_grade=False,
+        k=4
+    )
     baglam = "\n\n".join([f"[Sayfa {d.metadata.get('page')}]: {d.page_content}" for d in docs])
 
     # Kitaptaki soru formatlarını klonlamak için örnekleri al
@@ -200,9 +207,11 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
     rag_baglami = state.get("rag_baglami", "")
 
     analyzer = GeminiAnalyzer()
+    sinif_hedef = state.get("sinif_duzeyi") or "3. Sınıf"
     analiz_sonucu = analyzer.analiz_et(
         video_yolu=video_yolu,
         egitim_seviyesi=seviye,
+        sinif_duzeyi=sinif_hedef,
         rag_baglami=rag_baglami,
         video_basligi=video_basligi,
     )

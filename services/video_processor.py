@@ -46,6 +46,8 @@ class VideoProcessor:
             return path_ffmpeg
 
         olasi_yollar = [
+            Path(sys.executable).parent / "ffmpeg.exe",
+            ROOT / ".venv" / "Scripts" / "ffmpeg.exe",
             Path("C:/ffmpeg/bin/ffmpeg.exe"),
             Path("C:/Program Files/ffmpeg/bin/ffmpeg.exe"),
             Path(os.path.expanduser("~")) / "AppData/Local/Microsoft/WinGet/Links/ffmpeg.exe",

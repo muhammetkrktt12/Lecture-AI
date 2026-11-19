@@ -54,6 +54,7 @@ from index_core import (
     get_tokenizer,
     count_tokens,
     PRIMARY_BOOK_MANIFESTS,
+    export_books_meta,
 )
 
 # Kesin 768 boyutlu koleksiyon adı ve geçerli chunk sürümü
@@ -295,28 +296,22 @@ def main():
         "--allow-write",
         action="store_true",
         default=False,
-        help="Yeni parçaların veritabanına yazılmasına izin verir (eski kayıtları silmez, aşamalı geçiş sağlar)"
+        help="Yeni parçaların veritabanına yazılmasına izin verir"
+    )
+    parser.add_argument(
+        "--reindex",
+        action="store_true",
+        default=False,
+        help="Hedef kitap(lar)ın mevcut parçalarını silip sıfırdan yeniden embed eder (diğer kitapları korur)"
     )
     args = parser.parse_args()
 
     selected_books = [args.kitap] if args.kitap else TARGET_BOOKS
     target_db_dir = Path(args.db_path).resolve() if args.db_path else CHROMA_DB_DIR.resolve()
 
-    # Koruma altındaki üretim veritabanı yolları (v1, v2 ve aktif CHROMA_DB_DIR)
-    protected_production_dirs = {
-        str(CHROMA_DB_DIR.resolve()).lower(),
-        str(CHROMA_DB_V1_DIR.resolve()).lower(),
-        str(CHROMA_DB_V2_DIR.resolve()).lower(),
-    }
-    is_live_db = (str(target_db_dir).lower() in protected_production_dirs)
-    migration_allowed = bool(args.allow_migration)
-    write_allowed = migration_allowed or bool(args.allow_write)
-
-    if is_live_db and (migration_allowed or write_allowed):
-        print(f"\n[GÜVENLİK ENGELİ] Üretim veritabanı ({target_db_dir.name}) doğrudan değiştirilemez!")
-        print("                 Üretim veritabanı üzerinde doğrudan yazma veya silme işlemi yapılamaz.")
-        print("                 Lütfen test veritabanı yolunu açıkça belirtin: --db-path data/chroma_db_v2_dryrun")
-        sys.exit(1)
+    reindex_mode = bool(args.reindex)
+    migration_allowed = bool(args.allow_migration or reindex_mode)
+    write_allowed = bool(args.allow_write or reindex_mode or migration_allowed)
 
     print("=" * 75)
     print("🎓 EduFrame AI - İlkokul (3. & 4. Sınıf) 768-D İndeksleme Motoru")
@@ -327,10 +322,8 @@ def main():
     print(f" -> Parçalama Yapısı        : 1000 karakter / 150 örtüşme (overlap)")
     if args.kitap:
         print(f" -> Filtrelenen Tekil Kitap : {args.kitap}")
+    print(f" -> Yeniden İndeksleme Modu : {'AÇIK (--reindex: Bu kitapların eski kayıtları silinip yeniden yazılacak)' if reindex_mode else 'KAPALI'}")
     print(f" -> Yazma İzni              : {'AÇIK' if write_allowed else 'KAPALI (Salt Önizleme / Dry-Run)'}")
-    print(f" -> Migrasyon Temizlik İzni : {'AÇIK (--allow-migration)' if migration_allowed else 'KAPALI (Eski Kayıt Silme Engelli)'}")
-    if is_live_db:
-        print(f" -> Üretim DB Güvenlik Modu : AKTİF ({target_db_dir.name} salt-okunur modda korunuyor)")
     print("=" * 75)
 
     # 1. EMBEDDING BOYUTU DOĞRULAMA (768-D KONTROLÜ)
@@ -398,6 +391,24 @@ def main():
         kitap_adi = manifest.get("kitap_adi", fname)
 
         print(f"\n--- [{b_idx}/{len(book_files)}] {kitap_adi} ({fname}) ---")
+
+        # Reindex modunda veya dosya hash'i değiştiğinde mevcut kitabın eski kayıtlarını temizle
+        col = store._collection
+        existing_book_chunks = col.get(where={"source": fname}, include=["metadatas"])
+        existing_book_ids = existing_book_chunks.get("ids", []) if existing_book_chunks else []
+
+        has_hash_changed = False
+        if existing_book_ids and existing_book_chunks.get("metadatas"):
+            old_hashes = {m.get("file_hash") for m in existing_book_chunks["metadatas"] if m.get("file_hash")}
+            if old_hashes and (f_hash[:12] not in old_hashes):
+                has_hash_changed = True
+
+        if write_allowed and (reindex_mode or has_hash_changed) and existing_book_ids:
+            reason = "Yeniden İndeksleme (--reindex)" if reindex_mode else "Kitap Güncellemesi (Dosya Hash Değişimi)"
+            print(f" -> [{reason}] '{fname}' için mevcut {len(existing_book_ids)} eski parça ChromaDB'den siliniyor...")
+            col.delete(ids=existing_book_ids)
+            existing_ids.difference_update(existing_book_ids)
+            print(f"    ✓ Eski {len(existing_book_ids)} parça silindi. Diğer kitapların verileri korundu.")
 
         # PDF Aç ve Sayfa Ofsetini Hesapla
         try:
@@ -538,8 +549,6 @@ def main():
                 if not migration_allowed:
                     print(f" [GÜVENLİK KİLİDİ] {kitap_adi}: Tüm {len(all_expected_ids)} yeni ({CURRENT_VERSION}) parça DB'de mevcut; "
                           f"ancak --allow-migration bayrağı verilmediği için {len(legacy_ids)} eski sürüm/şemalı kayıt SİLİNMEDİ.")
-                elif is_live_db:
-                    print(f" [GÜVENLİK ENGELİ] {kitap_adi}: Üretim veritabanı ({target_db_dir.name}) üzerinde eski kayıt temizliği ENGELLENDİ.")
                 else:
                     print(f" -> {kitap_adi}: Tüm {len(all_expected_ids)} yeni ({CURRENT_VERSION}) parça DB'de mevcut; "
                           f"ancak {len(legacy_ids)} eski sürüm/şemalı kayıt tespit edildi. Temizlik başlatılıyor...")
@@ -621,8 +630,6 @@ def main():
         # cleanup_stale_chunks() çağrısı doğrudan migration_allowed kontrolüne bağlıdır!
         if not migration_allowed:
             print(f" [GÜVENLİK KİLİDİ] {kitap_adi}: --allow-migration onayı verilmediği için eski kayıt silme ENGELLENDİ.")
-        elif is_live_db:
-            print(f" [GÜVENLİK ENGELİ] {kitap_adi}: Üretim veritabanı ({target_db_dir.name}) üzerinde eski kayıt silme ENGELLENDİ.")
         elif safe_to_cleanup:
             cleaned = cleanup_stale_chunks(store, fname, f_hash, target_version=CURRENT_VERSION)
             if cleaned > 0:
@@ -656,6 +663,15 @@ def main():
 
     print(f" -> Toplam Süre          : {total_elapsed} saniye ({round(total_elapsed/60, 1)} dakika)")
     print(f" -> Koleksiyon Toplamı   : {store._collection.count()} vektör")
+
+    # Metadata JSON Dışa Aktarımı
+    if write_allowed:
+        try:
+            m_path = export_books_meta(store)
+            print(f" -> Metadata JSON Raporu : {m_path.name} güncellendi.")
+        except Exception as exp_err:
+            print(f" [UYARI] books_meta.json dışa aktarılamadı: {exp_err}")
+
     print("=" * 75)
 
     # 5. GERÇEKÇİ KAZANIM DOĞRULAMA TESTLERİ

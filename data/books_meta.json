@@ -1,0 +1,335 @@
+{
+  "veritabani": {
+    "koleksiyon_adi": "eduframe_meb_768",
+    "embedding_modeli": "embeddinggemma",
+    "embedding_boyutu": 768,
+    "toplam_chunk": 765,
+    "toplam_token": 177343,
+    "son_guncelleme": "2026-11-19T15:17:42.267875"
+  },
+  "kitaplar": {
+    "ilkokul_fenbilimleri_3.sinif_1.kitap.pdf": {
+      "kitap_adi": "MEB 3. Sınıf Fen Bilimleri (1. Kitap)",
+      "sinif": "3. Sınıf",
+      "ders": "Fen Bilimleri",
+      "egitim_seviyesi": "İlkokul",
+      "dosya_sha256": "7ff5691b3062dfcbb5bee99c33762f8cb2d716cd8ba7afab196d907ddd8a0499",
+      "dosya_boyutu_mb": 109.21,
+      "fiziksel_sayfa_sayisi": 160,
+      "sayfa_ofseti": 1,
+      "chunk_sayisi": 205,
+      "toplam_token": 46087,
+      "ortalama_token": 224.8,
+      "token_araligi": {
+        "min": 25,
+        "max": 658
+      },
+      "uniteler": [
+        {
+          "basili_sayfa_baslangic": 13,
+          "basili_sayfa_bitis": 25,
+          "unite_basligi": "1. Ünite: Bilimsel Keşif Yolculuğu",
+          "konu_basligi": "Bilimsel Bilgiye Ulaşma Yolları",
+          "alt_konu_basligi": "Gözlem, Deney ve Bilgi Kaynakları"
+        },
+        {
+          "basili_sayfa_baslangic": 26,
+          "basili_sayfa_bitis": 38,
+          "unite_basligi": "1. Ünite: Bilimsel Keşif Yolculuğu",
+          "konu_basligi": "Bilim İnsanlarının Özellikleri",
+          "alt_konu_basligi": "Merak, Sorgulama ve Araştırma"
+        },
+        {
+          "basili_sayfa_baslangic": 39,
+          "basili_sayfa_bitis": 57,
+          "unite_basligi": "2. Ünite: Canlılar Dünyasına Yolculuk",
+          "konu_basligi": "Canlıların Sınıflandırılması",
+          "alt_konu_basligi": "Bitkiler, Hayvanlar ve Benzerlikler"
+        },
+        {
+          "basili_sayfa_baslangic": 58,
+          "basili_sayfa_bitis": 68,
+          "unite_basligi": "2. Ünite: Canlılar Dünyasına Yolculuk",
+          "konu_basligi": "Duyu Organlarının İşlevleri",
+          "alt_konu_basligi": "Beş Duyu Organı ve Sağlığın Korunması"
+        },
+        {
+          "basili_sayfa_baslangic": 69,
+          "basili_sayfa_bitis": 80,
+          "unite_basligi": "2. Ünite: Canlılar Dünyasına Yolculuk",
+          "konu_basligi": "Canlıların Yaşam Döngüleri",
+          "alt_konu_basligi": "Doğma, Büyüme, Gelişme ve Üreme"
+        },
+        {
+          "basili_sayfa_baslangic": 81,
+          "basili_sayfa_bitis": 92,
+          "unite_basligi": "3. Ünite: Yer Bilimciler İş Başında",
+          "konu_basligi": "Kayaçlar, Madenler ve Mineraller",
+          "alt_konu_basligi": "Kayaçların Yapısı ve Ekonomik Değeri"
+        },
+        {
+          "basili_sayfa_baslangic": 93,
+          "basili_sayfa_bitis": 104,
+          "unite_basligi": "3. Ünite: Yer Bilimciler İş Başında",
+          "konu_basligi": "Fosil Oluşumu",
+          "alt_konu_basligi": "Fosillerin Oluşumu ve Geçmişe Işık Tutması"
+        },
+        {
+          "basili_sayfa_baslangic": 105,
+          "basili_sayfa_bitis": 117,
+          "unite_basligi": "4. Ünite: Maddeyi Tanıyalım",
+          "konu_basligi": "Maddenin Hâlleri",
+          "alt_konu_basligi": "Katı, Sıvı ve Gaz Maddeler"
+        },
+        {
+          "basili_sayfa_baslangic": 118,
+          "basili_sayfa_bitis": 126,
+          "unite_basligi": "4. Ünite: Maddeyi Tanıyalım",
+          "konu_basligi": "Karışımlar ve Ayrılması",
+          "alt_konu_basligi": "Eleme, Süzme ve Mıknatısla Ayırma"
+        },
+        {
+          "basili_sayfa_baslangic": 127,
+          "basili_sayfa_bitis": 150,
+          "unite_basligi": "4. Ünite: Maddeyi Tanıyalım",
+          "konu_basligi": "Atıkların Ayrıştırılması",
+          "alt_konu_basligi": "Geri Dönüşüm ve Çevre Bilinci"
+        }
+      ]
+    },
+    "ilkokul_fenbilimleri_3.sinif_2.kitap.pdf": {
+      "kitap_adi": "MEB 3. Sınıf Fen Bilimleri (2. Kitap)",
+      "sinif": "3. Sınıf",
+      "ders": "Fen Bilimleri",
+      "egitim_seviyesi": "İlkokul",
+      "dosya_sha256": "421c34396672a925f674c4501c6dea0bee505e79da1a6843880579301fbd30f5",
+      "dosya_boyutu_mb": 169.81,
+      "fiziksel_sayfa_sayisi": 162,
+      "sayfa_ofseti": 1,
+      "chunk_sayisi": 186,
+      "toplam_token": 38980,
+      "ortalama_token": 209.6,
+      "token_araligi": {
+        "min": 25,
+        "max": 658
+      },
+      "uniteler": [
+        {
+          "basili_sayfa_baslangic": 13,
+          "basili_sayfa_bitis": 28,
+          "unite_basligi": "5. Ünite: Hareketi Keşfediyorum",
+          "konu_basligi": "Varlıkların Hareketleri",
+          "alt_konu_basligi": "Hızlanma, Yavaşlama, Dönme ve Sallanma"
+        },
+        {
+          "basili_sayfa_baslangic": 29,
+          "basili_sayfa_bitis": 40,
+          "unite_basligi": "5. Ünite: Hareketi Keşfediyorum",
+          "konu_basligi": "Kuvvet ve Etkileri",
+          "alt_konu_basligi": "İtme, Çekme Kuvveti ve Cisimleri Harekete Geçirme"
+        },
+        {
+          "basili_sayfa_baslangic": 41,
+          "basili_sayfa_bitis": 51,
+          "unite_basligi": "6. Ünite: Yaşamımızı Kolaylaştıran Elektrik",
+          "konu_basligi": "Elektrikli Araç Gereç",
+          "alt_konu_basligi": "Elektrikli Araçların Kullanım Alanları"
+        },
+        {
+          "basili_sayfa_baslangic": 52,
+          "basili_sayfa_bitis": 60,
+          "unite_basligi": "6. Ünite: Yaşamımızı Kolaylaştıran Elektrik",
+          "konu_basligi": "Elektrikli Araçların Güvenli Kullanımı",
+          "alt_konu_basligi": "Elektrik Çarpması ve Güvenlik Önlemleri"
+        },
+        {
+          "basili_sayfa_baslangic": 61,
+          "basili_sayfa_bitis": 72,
+          "unite_basligi": "6. Ünite: Yaşamımızı Kolaylaştıran Elektrik",
+          "konu_basligi": "Elektriğin Tasarruflu Kullanımı",
+          "alt_konu_basligi": "Enerji Tasarrufu ve Doğal Kaynaklar"
+        },
+        {
+          "basili_sayfa_baslangic": 73,
+          "basili_sayfa_bitis": 83,
+          "unite_basligi": "7. Ünite: Toprağı Tanıyorum",
+          "konu_basligi": "Toprak Oluşumu ve Yapısı",
+          "alt_konu_basligi": "Toprağın Önemi ve Erozyon"
+        },
+        {
+          "basili_sayfa_baslangic": 84,
+          "basili_sayfa_bitis": 98,
+          "unite_basligi": "7. Ünite: Toprağı Tanıyorum",
+          "konu_basligi": "Bitki Yetiştirme",
+          "alt_konu_basligi": "Tohum Çimlenmesi ve Tarımsal Üretim"
+        },
+        {
+          "basili_sayfa_baslangic": 99,
+          "basili_sayfa_bitis": 109,
+          "unite_basligi": "8. Ünite: Canlıların Yaşam Alanları",
+          "konu_basligi": "Yaşam Alanları",
+          "alt_konu_basligi": "Kara, Su ve Hava Yaşam Alanları"
+        },
+        {
+          "basili_sayfa_baslangic": 110,
+          "basili_sayfa_bitis": 116,
+          "unite_basligi": "8. Ünite: Canlıların Yaşam Alanları",
+          "konu_basligi": "Canlı Çeşitliliği",
+          "alt_konu_basligi": "Biyoçeşitlilik ve Nesli Tükenen Canlılar"
+        },
+        {
+          "basili_sayfa_baslangic": 117,
+          "basili_sayfa_bitis": 150,
+          "unite_basligi": "8. Ünite: Canlıların Yaşam Alanları",
+          "konu_basligi": "Yaşam Alanlarının Korunması",
+          "alt_konu_basligi": "Doğal Çevreyi Koruma Bilinci"
+        }
+      ]
+    },
+    "ilkokul_fenbilimleri_4.sinif.pdf": {
+      "kitap_adi": "MEB 4. Sınıf Fen Bilimleri",
+      "sinif": "4. Sınıf",
+      "ders": "Fen Bilimleri",
+      "egitim_seviyesi": "İlkokul",
+      "dosya_sha256": "51da441d65fb22affcc71ffbb48b7078517a5c4757274bf4fa9adb330b107efd",
+      "dosya_boyutu_mb": 44.73,
+      "fiziksel_sayfa_sayisi": 220,
+      "sayfa_ofseti": 1,
+      "chunk_sayisi": 374,
+      "toplam_token": 92276,
+      "ortalama_token": 246.7,
+      "token_araligi": {
+        "min": 48,
+        "max": 641
+      },
+      "uniteler": [
+        {
+          "basili_sayfa_baslangic": 20,
+          "basili_sayfa_bitis": 32,
+          "unite_basligi": "1. Ünite: Yer Kabuğu ve Hareketler",
+          "konu_basligi": "Yer Kabuğunun Yapısı",
+          "alt_konu_basligi": "Kayaçlar, Madenler ve Fosiller"
+        },
+        {
+          "basili_sayfa_baslangic": 33,
+          "basili_sayfa_bitis": 45,
+          "unite_basligi": "1. Ünite: Yer Kabuğu ve Hareketler",
+          "konu_basligi": "Dünya'mızın Hareketleri",
+          "alt_konu_basligi": "Dönme ve Dolanma Hareketleri, Gece-Gündüz, Yıl"
+        },
+        {
+          "basili_sayfa_baslangic": 46,
+          "basili_sayfa_bitis": 58,
+          "unite_basligi": "2. Ünite: Besinlerimiz",
+          "konu_basligi": "Besinler ve Özellikleri",
+          "alt_konu_basligi": "Karbonhidrat, Protein, Yağ, Vitamin, Su ve Mineraller"
+        },
+        {
+          "basili_sayfa_baslangic": 59,
+          "basili_sayfa_bitis": 74,
+          "unite_basligi": "2. Ünite: Besinlerimiz",
+          "konu_basligi": "Sağlıklı Yaşam ve Zararlı Alışkanlıklar",
+          "alt_konu_basligi": "Dengeli Beslenme, Sigara ve Alkolün Zararları"
+        },
+        {
+          "basili_sayfa_baslangic": 75,
+          "basili_sayfa_bitis": 84,
+          "unite_basligi": "3. Ünite: Kuvvetin Etkileri",
+          "konu_basligi": "Kuvvetin Cisimler Üzerindeki Etkileri",
+          "alt_konu_basligi": "Hızlandırıcı, Yavaşlatıcı, Yön ve Şekil Değiştirici Kuvvet"
+        },
+        {
+          "basili_sayfa_baslangic": 85,
+          "basili_sayfa_bitis": 97,
+          "unite_basligi": "3. Ünite: Kuvvetin Etkileri",
+          "konu_basligi": "Mıknatısların Uyguladığı Kuvvet",
+          "alt_konu_basligi": "Mıknatıs Kutupları ve Günlük Yaşamdaki Kullanımı"
+        },
+        {
+          "basili_sayfa_baslangic": 98,
+          "basili_sayfa_bitis": 102,
+          "unite_basligi": "4. Ünite: Maddenin Özellikleri",
+          "konu_basligi": "Maddeyi Niteleyen Özellikler",
+          "alt_konu_basligi": "Yüzen-Batan, Suyu Emen-Emmeyen Maddeler"
+        },
+        {
+          "basili_sayfa_baslangic": 103,
+          "basili_sayfa_bitis": 111,
+          "unite_basligi": "4. Ünite: Maddenin Özellikleri",
+          "konu_basligi": "Maddenin Ölçülebilir Özellikleri",
+          "alt_konu_basligi": "Kütle ve Hacim Ölçümü"
+        },
+        {
+          "basili_sayfa_baslangic": 112,
+          "basili_sayfa_bitis": 114,
+          "unite_basligi": "4. Ünite: Maddenin Özellikleri",
+          "konu_basligi": "Maddenin Hâlleri",
+          "alt_konu_basligi": "Katı, Sıvı ve Gaz Maddelerin Belirgin Özellikleri"
+        },
+        {
+          "basili_sayfa_baslangic": 115,
+          "basili_sayfa_bitis": 123,
+          "unite_basligi": "4. Ünite: Maddenin Özellikleri",
+          "konu_basligi": "Maddenin Isı Etkisiyle Değişimi",
+          "alt_konu_basligi": "Erime, Donma, Buharlaşma ve Hâl Değişimi"
+        },
+        {
+          "basili_sayfa_baslangic": 124,
+          "basili_sayfa_bitis": 139,
+          "unite_basligi": "4. Ünite: Maddenin Özellikleri",
+          "konu_basligi": "Saf Madde ve Karışımlar",
+          "alt_konu_basligi": "Karışımların Ayrılması ve Ekonomiye Katkısı"
+        },
+        {
+          "basili_sayfa_baslangic": 140,
+          "basili_sayfa_bitis": 146,
+          "unite_basligi": "5. Ünite: Aydınlatma ve Ses Teknolojileri",
+          "konu_basligi": "Aydınlatma Teknolojileri",
+          "alt_konu_basligi": "Geçmişten Günümüze Işık Kaynakları"
+        },
+        {
+          "basili_sayfa_baslangic": 147,
+          "basili_sayfa_bitis": 154,
+          "unite_basligi": "5. Ünite: Aydınlatma ve Ses Teknolojileri",
+          "konu_basligi": "Uygun Aydınlatma ve Tasarruf",
+          "alt_konu_basligi": "Göz Sağlığı ve Enerji Tasarrufu"
+        },
+        {
+          "basili_sayfa_baslangic": 155,
+          "basili_sayfa_bitis": 159,
+          "unite_basligi": "5. Ünite: Aydınlatma ve Ses Teknolojileri",
+          "konu_basligi": "Işık Kirliliği",
+          "alt_konu_basligi": "Işık Kirliliğinin Olumsuz Etkileri ve Önlemler"
+        },
+        {
+          "basili_sayfa_baslangic": 160,
+          "basili_sayfa_bitis": 168,
+          "unite_basligi": "5. Ünite: Aydınlatma ve Ses Teknolojileri",
+          "konu_basligi": "Ses Teknolojileri",
+          "alt_konu_basligi": "Geçmişten Günümüze Ses Araçları"
+        },
+        {
+          "basili_sayfa_baslangic": 169,
+          "basili_sayfa_bitis": 179,
+          "unite_basligi": "5. Ünite: Aydınlatma ve Ses Teknolojileri",
+          "konu_basligi": "Ses Kirliliği",
+          "alt_konu_basligi": "Gürültü ve İnsan Sağlığına Etkileri"
+        },
+        {
+          "basili_sayfa_baslangic": 180,
+          "basili_sayfa_bitis": 197,
+          "unite_basligi": "6. Ünite: İnsan ve Çevre",
+          "konu_basligi": "Bilinçli Tüketici",
+          "alt_konu_basligi": "Su, Besin ve Elektrik Tasarrufu, Geri Dönüşüm"
+        },
+        {
+          "basili_sayfa_baslangic": 198,
+          "basili_sayfa_bitis": 215,
+          "unite_basligi": "7. Ünite: Basit Elektrik Devreleri",
+          "konu_basligi": "Devre Elemanları ve Kurulumu",
+          "alt_konu_basligi": "Pil, Ampul, Anahtar, Bağlantı Kablosu ve Devre Şeması"
+        }
+      ]
+    }
+  }
+}

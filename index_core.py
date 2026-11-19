@@ -415,3 +415,95 @@ def cleanup_stale_chunks(
         print(f"[UYARI] cleanup_stale_chunks sırasında veritabanı hatası ({filename}): {e}")
         raise RuntimeError(f"ChromaDB eski sürüm temizliği ({filename}) başarısız oldu: {e}") from e
     return 0
+
+
+# ---------------------------------------------------------------------------
+# 8. METADATA JSON DIŞA AKTARIMI (books_meta.json)
+# ---------------------------------------------------------------------------
+def export_books_meta(store: Chroma, output_path: Optional[Path] = None) -> Path:
+    """
+    ChromaDB ve PDF dosyalarından derlenen tüm kitap manifestolarını,
+    token sayılarını, chunk dağılımlarını ve dosya hash'lerini 'data/books_meta.json' dosyasına yazar.
+    """
+    import json
+    from datetime import datetime
+    try:
+        from config import DATA_DIR, REFERENCE_BOOKS_DIR, COLLECTION, EMBED_MODEL
+    except ImportError:
+        ROOT = Path(__file__).resolve().parent
+        DATA_DIR = ROOT / "data"
+        REFERENCE_BOOKS_DIR = DATA_DIR / "reference_books"
+        COLLECTION = "eduframe_meb_768"
+        EMBED_MODEL = "embeddinggemma"
+
+    out_file = output_path or (DATA_DIR / "books_meta.json")
+
+    col = store._collection
+    res = col.get(include=["metadatas"])
+
+    meta_by_book: Dict[str, Dict[str, Any]] = {}
+    for m in res.get("metadatas", []):
+        src = m.get("source", "Bilinmeyen")
+        tc = int(m.get("token_count", 0))
+        if src not in meta_by_book:
+            meta_by_book[src] = {"chunks": 0, "tokens": 0, "min_tokens": 999999, "max_tokens": 0}
+        meta_by_book[src]["chunks"] += 1
+        meta_by_book[src]["tokens"] += tc
+        meta_by_book[src]["min_tokens"] = min(meta_by_book[src]["min_tokens"], tc)
+        meta_by_book[src]["max_tokens"] = max(meta_by_book[src]["max_tokens"], tc)
+
+    export_data = {
+        "veritabani": {
+            "koleksiyon_adi": col.name or COLLECTION,
+            "embedding_modeli": EMBED_MODEL,
+            "embedding_boyutu": 768,
+            "toplam_chunk": len(res.get("metadatas", [])),
+            "toplam_token": sum(b["tokens"] for b in meta_by_book.values()),
+            "son_guncelleme": datetime.now().isoformat(),
+        },
+        "kitaplar": {}
+    }
+
+    for fname, manifest in PRIMARY_BOOK_MANIFESTS.items():
+        fpath = REFERENCE_BOOKS_DIR / fname
+        if not fpath.exists():
+            continue
+        try:
+            reader = pypdf.PdfReader(str(fpath))
+            p_count = len(reader.pages)
+            offset = detect_page_offset(reader)
+        except Exception:
+            p_count = 0
+            offset = 1
+
+        f_hash = calculate_file_hash(fpath)
+        stats = meta_by_book.get(fname, {"chunks": 0, "tokens": 0, "min_tokens": 0, "max_tokens": 0})
+
+        export_data["kitaplar"][fname] = {
+            "kitap_adi": manifest.get("kitap_adi", fname),
+            "sinif": manifest.get("sinif", ""),
+            "ders": manifest.get("ders", ""),
+            "egitim_seviyesi": manifest.get("seviye", ""),
+            "dosya_sha256": f_hash,
+            "dosya_boyutu_mb": round(fpath.stat().st_size / (1024 * 1024), 2),
+            "fiziksel_sayfa_sayisi": p_count,
+            "sayfa_ofseti": offset,
+            "chunk_sayisi": stats["chunks"],
+            "toplam_token": stats["tokens"],
+            "ortalama_token": round(stats["tokens"] / stats["chunks"], 1) if stats["chunks"] else 0,
+            "token_araligi": {"min": stats["min_tokens"] if stats["chunks"] else 0, "max": stats["max_tokens"]},
+            "uniteler": [
+                {
+                    "basili_sayfa_baslangic": u[0],
+                    "basili_sayfa_bitis": u[1],
+                    "unite_basligi": u[2],
+                    "konu_basligi": u[3],
+                    "alt_konu_basligi": u[4]
+                } for u in manifest.get("uniteler", [])
+            ]
+        }
+
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump(export_data, f, ensure_ascii=False, indent=2)
+
+    return out_file
