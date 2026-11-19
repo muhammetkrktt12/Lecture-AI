@@ -21,6 +21,7 @@ import sys
 import json
 import shutil
 import urllib.request
+import requests
 from pathlib import Path
 from typing import Optional
 
@@ -313,6 +314,36 @@ def main():
         basari_sayisi += 1
     else:
         durum_yaz("GEMINI_API_KEY", False, "Tanımsız veya geçersiz (Sistem tamamen yerel Ollama/Whisper modunda çalışacak)")
+
+    # Canlı Gemini API "Merhaba" Yanıt Testi
+    toplam_kontrol += 1
+    if gemini_key and not gemini_key.startswith("AIzaSyDummy") and len(gemini_key) > 20:
+        try:
+            test_modeller = ["gemini-3-flash-preview", "gemini-3.8-flash", "gemini-flash-latest"]
+            yanit_alindi = False
+            hata_ozeti = ""
+            for test_model in test_modeller:
+                test_url = f"https://generativelanguage.googleapis.com/v1beta/models/{test_model}:generateContent?key={gemini_key}"
+                test_payload = {"contents": [{"parts": [{"text": "merhaba"}]}]}
+                try:
+                    res = requests.post(test_url, json=test_payload, timeout=15)
+                    if res.status_code == 200:
+                        yanit_metni = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        durum_yaz("Google Gemini Canlı Test", True, f"Model: {test_model} -> Yanıt: '{yanit_metni}'")
+                        basari_sayisi += 1
+                        yanit_alindi = True
+                        break
+                    else:
+                        hata_ozeti = f"{test_model} (HTTP {res.status_code})"
+                except Exception as req_err:
+                    hata_ozeti = f"{test_model} ({type(req_err).__name__})"
+                    continue
+            if not yanit_alindi:
+                durum_yaz("Google Gemini Canlı Test", False, f"Modellerden 200 OK yanıtı alınamadı: {hata_ozeti}")
+        except Exception as e:
+            durum_yaz("Google Gemini Canlı Test", False, f"Bağlantı Hatası: {e}")
+    else:
+        durum_yaz("Google Gemini Canlı Test", False, "API anahtarı eksik olduğu için test atlandı")
 
     # -------------------------------------------------------------
     # SONUÇ VE ÖZET
