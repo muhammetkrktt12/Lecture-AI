@@ -6,7 +6,10 @@ Ekran Değişimlerine ve Görsel Materyallere Dayalı Otonom Ders Notu ve PDF Fa
 
 import os
 import sys
+from hashlib import sha256
+from html import escape
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
@@ -163,9 +166,18 @@ with tab_video:
     else:
         dosya = st.file_uploader("Yerel MP4 Dosyası Seçin:", type=["mp4", "mkv", "mov"])
         if dosya:
-            hedef = VIDEOS_DIR / f"yuklenen_{dosya.name}"
-            with open(hedef, "wb") as f:
-                f.write(dosya.getbuffer())
+            icerik = dosya.getbuffer()
+            hedef = VIDEOS_DIR / sha256(icerik).hexdigest() / Path(dosya.name).name
+            hedef.parent.mkdir(parents=True, exist_ok=True)
+            if not hedef.is_file():
+                with NamedTemporaryFile(dir=hedef.parent, delete=False) as gecici:
+                    try:
+                        gecici.write(icerik)
+                        gecici.close()
+                        Path(gecici.name).replace(hedef)
+                    finally:
+                        gecici.close()
+                        Path(gecici.name).unlink(missing_ok=True)
             video_kaynagi = str(hedef.resolve())
 
     # Eğer önceden inmiş örnek video varsa pratik kullanım için öner
@@ -183,13 +195,12 @@ with tab_video:
         else:
             with st.status("Görsel Materyal ve Ses Akışı İnceleniyor...", expanded=True) as status:
                 st.write("1️⃣ LangGraph: Niyet analizi yapılıyor ve 'pdf_isleme' boru hattı kuruluyor...")
-                st.write("2️⃣ Video İşleme: Ekrandaki slayt ve materyal değişimleri tespit ediliyor...")
-                st.write("3️⃣ RAG: Seçilen sınıf seviyesindeki ders kitabından pedagojik içerik ve soru şablonları çekiliyor...")
-                st.write("4️⃣ Multimodal Analiz: Her materyalin ekranda kaldığı zaman aralığındaki konuşmalar eşleştiriliyor...")
-                st.write("5️⃣ FFmpeg: Her materyalin ekrandaki en net karesi yüksek çözünürlükte yakalanıyor...")
+                st.write("2️⃣ Whisper ve video işleme: Konuşma, ders bölümleri ve ekran kareleri eşleştiriliyor...")
+                st.write("3️⃣ RAG: Her bölüm için seçilen sınıfın ders kitapları aranıyor...")
+                st.write("4️⃣ Bölüm analizi: Ders anlatımı ve önemli kavramlar hazırlanıyor...")
                 if soru_tercihi:
-                    st.write(f"6️⃣ Soru Motoru: {secilen_seviye} kademesine uygun sorular ve cevap anahtarı üretiliyor...")
-                st.write("7️⃣ ReportLab: Gerçek kurumsal PDF fasikülü derleniyor...")
+                    st.write(f"5️⃣ Soru Motoru: {secilen_seviye} kademesine uygun sorular ve cevap anahtarı üretiliyor...")
+                st.write("📄 Ders fasikülü PDF olarak derleniyor...")
 
                 core = EduFrameAgenticCore()
                 try:
@@ -197,6 +208,7 @@ with tab_video:
                         kullanici_girisi=f"{secilen_sinif} ders notunu çıkar",
                         video_kaynagi=video_kaynagi,
                         egitim_seviyesi=secilen_seviye,
+                        sinif_duzeyi=secilen_sinif,
                         soru_eklensin_mi=soru_tercihi
                     )
                 except EksikDersKaresiHatasi as hata:
@@ -243,10 +255,12 @@ with tab_video:
                         st.image(kare_yolu, caption=f"Ekrandaki Materyal (Zaman Aralığı: {z_aralik})", use_container_width=True)
 
                     st.markdown("**1. Öğretmenin Anlatımı (Orijinal Transkript):**")
-                    st.markdown(f'<div class="box-transcript">"{bolum.get("transkript")}"</div>', unsafe_allow_html=True)
+                    transkript = escape(bolum.get("transkript") or "")
+                    st.markdown(f'<div class="box-transcript">"{transkript}"</div>', unsafe_allow_html=True)
 
                     st.markdown(f"**2. Düzenlenmiş Konu Anlatımı ({secilen_sinif} Ders Kitabı Referanslı):**")
-                    st.markdown(f'<div class="box-pedagogical">{bolum.get("duzenlenmis_anlatim")}</div>', unsafe_allow_html=True)
+                    anlatim = escape(bolum.get("duzenlenmis_anlatim") or "")
+                    st.markdown(f'<div class="box-pedagogical">{anlatim}</div>', unsafe_allow_html=True)
 
                     st.markdown("**3. Bölümün Önemli Kavramları ve Açıklamaları:**")
                     kavramlar = bolum.get("onemli_kavramlar", [])

@@ -6,20 +6,14 @@ pedagojik ders fasikülü mizanpajına tam uygun, gerçek bir .PDF dosyası basa
 
 Mizanpaj Mimarisi:
 1. Kapak ve Başlık Bilgisi (Sayfa 1 Üst Bilgi)
-2. Materyal Değişim Bölümleri (Sayfa 1 - 10: Her ekran materyali için 1 sayfa)
+2. Materyal Değişim Bölümleri (Her bölüm yeni sayfada başlar)
    - Materyal Başlığı ve Zaman Aralığı
    - Yüksek Çözünürlüklü Ekran Görüntüsü
    - Orijinal Transkript Kutusu
    - Düzenlenmiş Konu Anlatımı Kutusu
    - Bölümün Önemli Kavramları Kutusu
    - İlgili Ders Kitabı Sayfa Referansı
-3. Genel Konu Özeti ve Karşılaştırmalı Kavram Tablosu (Sayfa 11)
-4. Öğrenci Etkinlik ve Değerlendirme Fasikülü (Sayfa 12 & 13)
-   - 10 Özgün Soru (Sayfa 12: Soru 1–5, Sayfa 13: Soru 6–10)
-   - Modern Kart Tasarımı, Kategori Rozetleri, Ferah Tipografi
-5. Detaylı Çözümlü Cevap Anahtarı ve Kazanım Tablosu (Sayfa 14)
-   - MEB Kaynakça ve Sayfa Eşleştirme Tablosu
-6. Sayfa Numaralandırması: Sayfa X / Y (NumberedCanvas)
+3. Varsa genel özet, değerlendirme soruları, cevap anahtarı ve kaynakça
 """
 
 import os
@@ -28,6 +22,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+from xml.sax.saxutils import escape
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -295,7 +290,7 @@ class PDFGenerator:
             [Paragraph(f"<b>{baslik}</b>", self.style_box_label)],
             [paragraf]
         ]
-        t = Table(icerik, colWidths=[511])
+        t = Table(icerik, colWidths=[511], splitInRow=1)
         t.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(bg_color)),
             ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor(border_color)),
@@ -534,17 +529,8 @@ class PDFGenerator:
 
         return cikti_kaynaklar
 
-    def pdf_olustur(
-        self,
-        video_analizi: Dict[str, Any],
-        sorular: Optional[List[Dict[str, Any]]] = None,
-        video_kaynak_bilgisi: str = "Video Anlatımı",
-        cikis_dosya_adi: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Görsel materyal değişimlerine dayalı 14 sayfalık tam teşekküllü kurumsal PDF fasikülünü üretir.
-        """
-        bolumler = video_analizi.get("bolumler") or []
+    @staticmethod
+    def ders_karelerini_dogrula(bolumler: List[Dict[str, Any]]) -> None:
         if not bolumler:
             raise EksikDersKaresiHatasi("PDF üretilemedi. Görseli olan ders bölümü bulunamadı.")
 
@@ -568,6 +554,19 @@ class PDFGenerator:
                 + "\n".join(f"- {bolum}" for bolum in eksik_kareler)
             )
 
+    def pdf_olustur(
+        self,
+        video_analizi: Dict[str, Any],
+        sorular: Optional[List[Dict[str, Any]]] = None,
+        video_kaynak_bilgisi: str = "Video Anlatımı",
+        cikis_dosya_adi: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Zaman damgalı görsel materyal bölümlerinden PDF ders fasikülü üretir.
+        """
+        bolumler = video_analizi.get("bolumler") or []
+        self.ders_karelerini_dogrula(bolumler)
+
         ders_adi = (video_analizi.get("ders_adi") or "FEN BİLİMLERİ").upper()
         ham_unite = video_analizi.get("unite_basligi") or "Elektrikli Araçlar ve Elektrik Kaynakları"
         unite_basligi = self._temizle_dosya_yolu(ham_unite)
@@ -582,6 +581,10 @@ class PDFGenerator:
             rozet = "<font color='#0284c7'><b>[Yerel Yapay Zeka (Ollama qwen3.5:4b)]</b></font>"
         elif uretim_kaynagi == "gemini":
             rozet = "<font color='#16a34a'><b>[Google Gemini API]</b></font>"
+        elif uretim_kaynagi == "transkript":
+            rozet = "Whisper transkripti"
+        elif uretim_kaynagi == "karma":
+            rozet = "Video ve bölüm analizi"
         elif uretim_kaynagi == "rag_fallback":
             rozet = "<font color='#d97706'><b>[Pedagojik RAG Bağlamı]</b></font>"
         else:
@@ -615,11 +618,11 @@ class PDFGenerator:
             # Kapak Başlığı sadece 1. Sayfada görünür
             if idx == 1:
                 flowables.append(Paragraph(f"{ders_adi} – DERS NOTU FASİKÜLÜ", self.style_super_title))
-                flowables.append(Paragraph(unite_basligi, self.style_sub_title))
+                flowables.append(Paragraph(escape(unite_basligi), self.style_sub_title))
                 meta_metni = (
                     f"<b>Kademe:</b> {egitim_seviyesi} ({sinif_duzeyi}) &nbsp;&nbsp;|&nbsp;&nbsp; "
                     f"<b>Tarih:</b> {tarih_str} &nbsp;&nbsp;|&nbsp;&nbsp; "
-                    f"<b>Kaynak:</b> {temiz_video_kaynak[:45]} &nbsp;&nbsp;|&nbsp;&nbsp; {rozet}"
+                    f"<b>Kaynak:</b> {escape(temiz_video_kaynak[:45])} &nbsp;&nbsp;|&nbsp;&nbsp; {rozet}"
                 )
                 flowables.append(Paragraph(meta_metni, self.style_meta))
                 flowables.append(Spacer(1, 4))
@@ -630,7 +633,7 @@ class PDFGenerator:
 
             # Bölüm Başlığı & Zaman Aralığı Tablosu
             baslik_tablosu = Table(
-                [[Paragraph(f"<b>{b_baslik}</b>", self.style_section_title),
+                [[Paragraph(f"<b>{escape(b_baslik)}</b>", self.style_section_title),
                   Paragraph(f"<b>Zaman Aralığı: {z_aralik}</b>", self.style_time_badge)]],
                 colWidths=[360, 151]
             )
@@ -644,25 +647,28 @@ class PDFGenerator:
             flowables.append(baslik_tablosu)
             flowables.append(Spacer(1, 5))
 
-            # Ekran Görüntüsü
-            img = Image(bolum["ekran_goruntusu_yolu"], width=470, height=180)
+            img = Image(bolum["ekran_goruntusu_yolu"], width=470, height=260, kind="proportional")
             img.hAlign = "CENTER"
             flowables.append(img)
             flowables.append(Spacer(1, 5))
 
-            # Transkript Kutusu (Öğretmenin Ham Konuşması)
-            ham_transkript = bolum.get("transkript", "")
-            t_para = Paragraph(f"\"{ham_transkript}\"", self.style_transcript)
-            t_box = self._kutu_olustur("1. Öğretmenin Anlatımı (Orijinal Transkript):", t_para, "#f8fafc", "#cbd5e1")
+            ham_transkript = bolum.get("transkript") or "Bu aralıkta konuşma bulunamadı."
+            konusma_zamani = bolum.get("konusma_zaman_araligi")
+            zaman_etiketi = f" {escape(konusma_zamani)}" if konusma_zamani else ""
+            t_para = Paragraph(escape(ham_transkript), self.style_transcript)
+            t_box = self._kutu_olustur(f"Orijinal Transkript{zaman_etiketi}", t_para, "#f8fafc", "#cbd5e1")
             flowables.append(t_box)
             flowables.append(Spacer(1, 5))
 
-            # Düzenlenmiş Konu Anlatımı (Ders Kitabı Referanslı)
             duzenli_anlatim = bolum.get("pedagojik_anlatim") or bolum.get("duzenlenmis_anlatim", "")
-            d_para = Paragraph(duzenli_anlatim, self.style_pedagogical)
-            d_box = self._kutu_olustur("2. Düzenlenmiş Konu Anlatımı (Ders Kitabı Referanslı):", d_para, "#eff6ff", "#93c5fd")
-            flowables.append(d_box)
-            flowables.append(Spacer(1, 5))
+            if duzenli_anlatim:
+                d_para = Paragraph(escape(duzenli_anlatim).replace("\n", "<br/>"), self.style_pedagogical)
+                baslik = "Düzenlenmiş Ders Anlatımı"
+                if bolum.get("kaynak_tipi") == "transkript":
+                    baslik = "Ders Anlatımı (Transkript)"
+                d_box = self._kutu_olustur(baslik, d_para, "#eff6ff", "#93c5fd")
+                flowables.append(d_box)
+                flowables.append(Spacer(1, 5))
 
             # Önemli Kavramlar Kutusu
             kavramlar = bolum.get("onemli_kavramlar", [])
@@ -671,7 +677,7 @@ class PDFGenerator:
                 for k in kavramlar:
                     k_ad = k.get("kavram", "")
                     k_aciklama = k.get("aciklama", "")
-                    kavram_metinleri.append(f"• <b>{k_ad}:</b> {k_aciklama}")
+                    kavram_metinleri.append(f"• <b>{escape(str(k_ad))}:</b> {escape(str(k_aciklama))}")
                 k_para = Paragraph("<br/>".join(kavram_metinleri), self.style_concept_body)
                 k_box = self._kutu_olustur("3. Bölümün Önemli Kavramları:", k_para, "#f0fdf4", "#86efac")
                 flowables.append(k_box)
@@ -680,80 +686,16 @@ class PDFGenerator:
             # Kitap Sayfa Referansı
             kitap_ref = bolum.get("kitap_referansi", "")
             if kitap_ref and kitap_ref != "MEB Ders Kitabı Referansı":
-                flowables.append(Paragraph(f"<b>MEB Ders Kitabı Doğrulaması:</b> <i>{kitap_ref}</i>", self.style_ref_tag))
-            else:
-                flowables.append(Paragraph("<b>MEB Ders Kitabı Doğrulaması:</b> <i>Bu bölüm için doğrulanmış ders kitabı kaynağı bulunamadı</i>", self.style_ref_tag))
+                flowables.append(Paragraph(f"<b>MEB Ders Kitabı Doğrulaması:</b> <i>{escape(kitap_ref)}</i>", self.style_ref_tag))
 
         # ===================================================================
-        # SAYFA 11: GENEL KONU ÖZETİ VE KAVRAM KARŞILAŞTIRMA TABLOSU
-        # ===================================================================
-        if bolumler:
-            flowables.append(PageBreak())
-
-        flowables.append(Paragraph("<b>Dersin Genel Konu Özeti ve Kavram Sentezi</b>", self.style_super_title))
-        flowables.append(Paragraph(f"{ders_adi} &nbsp;|&nbsp; {unite_basligi} &nbsp;|&nbsp; {sinif_duzeyi} Düzeyi &nbsp;|&nbsp; {rozet}", self.style_meta))
-        flowables.append(Spacer(1, 4))
-        flowables.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#2563eb"), spaceAfter=10))
-
-        genel_ozet = video_analizi.get("genel_ozet", "")
+        # Bölüm verisi bir genel özet içeriyorsa ayrı sayfada göster.
+        genel_ozet = video_analizi.get("genel_ozet")
         if genel_ozet:
-            ozet_para = Paragraph(genel_ozet, self.style_general_summary)
-            ozet_box = self._kutu_olustur("Genel Ünite Özeti ve Kazanım Çerçevesi:", ozet_para, "#f8fafc", "#94a3b8")
-            flowables.append(ozet_box)
-            flowables.append(Spacer(1, 14))
-
-        # 4 Temel Elektrik Kaynağının Karşılaştırma Tablosu (Yalnızca konu elektrik kaynakları olduğunda eklenir)
-        unite_lower = str(unite_basligi).lower()
-        bolumler_str = " ".join([b.get("bolum_basligi", "") for b in bolumler]).lower()
-        if any(w in unite_lower or w in bolumler_str for w in ["kaynak", "şehir elektriği", "pil", "batarya", "akü"]):
-            flowables.append(Paragraph("<b>4 Temel Elektrik Kaynağı Karşılaştırma Tablosu</b>", self.style_section_title))
-            flowables.append(Spacer(1, 6))
-
-            tablo_verisi = [
-                [
-                    Paragraph("<b>Elektrik Kaynağı</b>", self.style_table_header),
-                    Paragraph("<b>Tanım ve Güç Seviyesi</b>", self.style_table_header),
-                    Paragraph("<b>Örnek Kullanım Alanları</b>", self.style_table_header),
-                    Paragraph("<b>Şarj / Değişim</b>", self.style_table_header),
-                ],
-                [
-                    Paragraph("<b>1. Şehir Elektriği</b>", self.style_table_cell_bold),
-                    Paragraph("Santrallerde (baraj, rüzgâr, termik, güneş) üretilen çok yüksek enerjili elektrik.", self.style_table_cell),
-                    Paragraph("Buzdolabı, çamaşır makinesi, fırın, televizyon, ütü (Sabit büyük ev aletleri).", self.style_table_cell),
-                    Paragraph("Prizden kesintisiz aktarılır.", self.style_table_cell),
-                ],
-                [
-                    Paragraph("<b>2. Pil</b>", self.style_table_cell_bold),
-                    Paragraph("Düşük enerjili, hafif kimyasal enerji deposu. Az enerji harcayan taşınabilir aletler içindir.", self.style_table_cell),
-                    Paragraph("Duvar saati, televizyon kumandası, el feneri, uzaktan kumandalı oyuncak.", self.style_table_cell),
-                    Paragraph("Genellikle tek kullanımlık (primer); şarj edilebilen (sekonder) türleri de vardır. Atık pil kutusuna atılır.", self.style_table_cell),
-                ],
-                [
-                    Paragraph("<b>3. Batarya</b>", self.style_table_cell_bold),
-                    Paragraph("Birden fazla pil hücresinin birleşimiyle oluşan güçlü depolama kaynağı.", self.style_table_cell),
-                    Paragraph("Cep telefonu, tablet, dizüstü bilgisayar, telsiz, ışıldak.", self.style_table_cell),
-                    Paragraph("Şarj aleti ve priz bağlantısıyla defalarca doldurulabilir.", self.style_table_cell),
-                ],
-                [
-                    Paragraph("<b>4. Akü (Akümülatör)</b>", self.style_table_cell_bold),
-                    Paragraph("Motorlu taşıtların ilk marş hareketini başlatan ve elektrik donanımını besleyen büyük kaynak.", self.style_table_cell),
-                    Paragraph("Otomobil, otobüs, kamyon, uçak, helikopter, gemi (İlk marş ve elektrik donanımı).", self.style_table_cell),
-                    Paragraph("Motor çalışırken alternatör (şarj dinamosu) vasıtasıyla sürekli şarj edilir.", self.style_table_cell),
-                ],
-            ]
-
-            kaynak_tablosu = Table(tablo_verisi, colWidths=[90, 145, 185, 91])
-            kaynak_tablosu.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a8a")),
-                ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#cbd5e1")),
-                ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#ffffff"), colors.HexColor("#f8fafc")]),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-            ]))
-            flowables.append(kaynak_tablosu)
+            flowables.append(PageBreak())
+            flowables.append(Paragraph("Dersin Genel Özeti", self.style_super_title))
+            ozet_para = Paragraph(escape(genel_ozet), self.style_general_summary)
+            flowables.append(self._kutu_olustur("Genel Ünite Özeti", ozet_para, "#f8fafc", "#94a3b8"))
 
         # ===================================================================
         # SAYFA 12 & 13: ÖĞRENCİ ETKİNLİK VE DEĞERLENDİRME FASİKÜLÜ (10 SORU)

@@ -643,7 +643,7 @@ class VideoProcessor:
         video_p = Path(video_yolu)
         cikti_p = video_p.with_suffix(".transkript.txt")
 
-        if cikti_p.exists() and not zorla_yeniden:
+        if cikti_p.is_file() and cikti_p.stat().st_size > 0 and not zorla_yeniden:
             print(f"[VideoProcessor] Mevcut transkript dosyası bulundu (önbellek): {cikti_p.name}")
             return cikti_p
 
@@ -651,23 +651,24 @@ class VideoProcessor:
         self._cuda_ortamini_hazirla()
         from faster_whisper import WhisperModel
 
-        try:
-            model = WhisperModel(model_boyutu, device="cuda", compute_type="float16")
-        except Exception as e:
-            print(f"[UYARI] CUDA ile Whisper başlatılamadı ({e}), CPU moduna geçiliyor...")
-            model = WhisperModel(model_boyutu, device="cpu", compute_type="int8")
+        with TemporaryDirectory(dir=cikti_p.parent) as gecici_dizin:
+            gecici_yol = Path(gecici_dizin) / cikti_p.name
 
-        parcalar, _ = model.transcribe(
-            str(video_p),
-            language="tr",
-            vad_filter=True,
-        )
+            def _transkripti_yaz(device: str, compute_type: str) -> None:
+                model = WhisperModel(model_boyutu, device=device, compute_type=compute_type)
+                parcalar, _ = model.transcribe(str(video_p), language="tr", vad_filter=True)
+                with gecici_yol.open("w", encoding="utf-8") as dosya:
+                    for parca in parcalar:
+                        metin = parca.text.strip()
+                        if metin:
+                            dosya.write(f"[{parca.start:.2f} - {parca.end:.2f}] {metin}\n")
 
-        with cikti_p.open("w", encoding="utf-8") as dosya:
-            for parca in parcalar:
-                metin = parca.text.strip()
-                if metin:
-                    dosya.write(f"[{parca.start:.2f} - {parca.end:.2f}] {metin}\n")
+            try:
+                _transkripti_yaz("cuda", "float16")
+            except RuntimeError as e:
+                print(f"[UYARI] CUDA ile Whisper tamamlanamadı ({e}), CPU moduna geçiliyor...")
+                _transkripti_yaz("cpu", "int8")
+            gecici_yol.replace(cikti_p)
 
         print(f"[VideoProcessor] Transkript başarıyla oluşturuldu ve kaydedildi: {cikti_p.name}")
         return cikti_p

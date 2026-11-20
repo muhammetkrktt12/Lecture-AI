@@ -8,14 +8,14 @@ Mimari Akış ve Karar Düğümleri:
 1. 'planla' Düğümü: Kullanıcının niyetini (intent) ölçer.
    - Niyet 'bilgi_sorgusu' ise: Video indirme ve FFmpeg ASLA çalışmaz. Sadece
      seçilen eğitim seviyesindeki RAG'dan bilgi çekilerek yanıt verilir.
-   - Niyet 'pdf_isleme' ise: yt-dlp -> RAG Seviye Filtresi -> Gemini Multimodal
-     3 Katmanlı Sentez -> FFmpeg Kare Yakalama -> Soru Klonlama -> WeasyPrint PDF
+   - Niyet 'pdf_isleme' ise: yt-dlp -> Whisper ve kare bölümleme -> Bölüm bazlı RAG
+     ve pedagojik sentez -> İsteğe bağlı sorular -> ReportLab PDF
      boru hattı sırasıyla işletilir.
 """
 
-import os
 import sys
 from pathlib import Path
+from tempfile import mkdtemp
 
 # Kök dizini sys.path'e ekle
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -31,8 +31,8 @@ from services.rag_motoru import RAGMotoru
 from services.video_processor import VideoProcessor
 from services.gemini_analyzer import GeminiAnalyzer
 from services.question_generator import QuestionGenerator
-from services.pdf_generator import PDFGenerator
-from config import DEFAULT_SEVIYE
+from services.pdf_generator import EksikDersKaresiHatasi, PDFGenerator
+from config import DEFAULT_SEVIYE, FRAMES_DIR
 
 # Kalite ve Doğrulama Araçları (utils.lexical_tools öncelikli)
 try:
@@ -43,14 +43,6 @@ except ImportError:
     except ImportError:
         validate_citations = None
         rerank_candidates = None
-
-# Gemma Tokenizer (tokenizer_utils & gemma_tokenizer.json)
-try:
-    from tokenizer_utils import get_gemma_tokenizer
-    _CORE_TOKENIZER = get_gemma_tokenizer()
-except Exception:
-    _CORE_TOKENIZER = None
-
 
 # ---------------------------------------------------------------------------
 # DÜĞÜM FONKSİYONLARI (GRAPH NODES)
@@ -153,85 +145,40 @@ def video_indir_dugumu(state: EduFrameState) -> Dict[str, Any]:
     if not sonuc.get("success"):
         return {"hata": sonuc.get("error", "Video hazırlanamadı.")}
 
+    if sonuc.get("source_type") == "local":
+        sonuc["file_path"] = str(Path(kaynak).resolve())
     return {"video_bilgisi": sonuc}
 
 
 def rag_baglam_dugumu(state: EduFrameState) -> Dict[str, Any]:
-    """Seçilen eğitim seviyesine ait ders kitabından anlamsal bağlamı çeker."""
-    print("\n[LangGraph: rag_baglam] Müfredat bağlamı ve soru formatları getiriliyor...")
-    seviye = state.get("egitim_seviyesi", DEFAULT_SEVIYE)
-    video_bilgisi = state.get("video_bilgisi") or {}
-    video_basligi = video_bilgisi.get("title", "Fen Bilimleri Dersi")
-
-    rag = RAGMotoru()
-    sinif = state.get("sinif_duzeyi") or "3. Sınıf"
-    # Başlığa ve konuya göre seviye filtreli içerik çek (Sınıf İzolasyonu korumalı)
-    docs = rag.seviye_filtreli_arama(
-        sorgu=video_basligi,
-        egitim_seviyesi=seviye,
-        sinif=sinif,
-        allow_cross_grade=False,
-        k=4
-    )
-    baglam = "\n\n".join([f"[Sayfa {d.metadata.get('page')}]: {d.page_content}" for d in docs])
-
-    # Kitaptaki soru formatlarını klonlamak için örnekleri al
-    soru_ornekleri = rag.soru_formatlarini_getir(egitim_seviyesi=seviye, k=3)
-
-    # Gemma Tokenizer ile bağlam token analizi (tokenizer_utils)
-    if _CORE_TOKENIZER:
-        token_adedi = len(_CORE_TOKENIZER.encode(baglam).tokens)
-        print(f"[Tokenizer Analizi] RAG Bağlamı Gemma Token Sayısı: {token_adedi} token (Maks: 2048)")
-
+    """Yalnızca istenen değerlendirme soruları için kitap örneklerini getirir."""
+    if not state.get("soru_eklensin_mi"):
+        return {}
     return {
-        "rag_baglami": baglam,
-        "rag_soru_ornekleri": soru_ornekleri,
-        "rag_kaynaklari": [{"kaynak": d.metadata.get("source"), "sayfa": d.metadata.get("page")} for d in docs]
+        "rag_soru_ornekleri": RAGMotoru().soru_formatlarini_getir(
+            egitim_seviyesi=state.get("egitim_seviyesi", DEFAULT_SEVIYE),
+            sinif=state.get("sinif_duzeyi") or "3. Sınıf",
+            k=3,
+        )
     }
 
 
 def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
     """
     Multimodal görsel materyal analizi ve 3 Boyutlu RAG entegrasyonu:
-    1. Videoyu zaman damgalı bölümlere ayırır ve kareleri çıkarır.
+    1. Videodan önceden çıkarılan bölüm, kare ve konuşmayı kullanır.
     2. Her kare için gerçek multimodal görsel analiz yapar (unsurlar, açıklama, konuşma uyumu, konu ve kavramlar).
     3. Çok yönlü RAG sorguları ile ders kitabından parça çeker, alakasız parçaları eler (elenen_chunklar),
        yalnızca doğrulanmış parçaları (destekleyen_chunklar) kabul eder.
     4. Video ve ders kitabı somut örneklerini harmanlayarak nesnel, 3. tekil şahıs pedagojik sentez üretir.
     """
     print("\n[LangGraph: gemini_analiz] Multimodal materyal analizi, görsel kavrama ve 3D RAG entegrasyonu...")
-    video_bilgisi = state.get("video_bilgisi") or {}
-    video_yolu = video_bilgisi.get("file_path", "")
-    video_basligi = video_bilgisi.get("title", "Ders Anlatımı")
-    seviye = state.get("egitim_seviyesi", DEFAULT_SEVIYE)
-    rag_baglami = state.get("rag_baglami", "")
-
+    analiz_sonucu = state["video_analizi"]
+    bolumler = analiz_sonucu["bolumler"]
+    seviye = analiz_sonucu["egitim_seviyesi"]
+    sinif = analiz_sonucu["sinif_duzeyi"]
+    ders = analiz_sonucu["ders_adi"]
     analyzer = GeminiAnalyzer()
-    sinif_hedef = state.get("sinif_duzeyi") or "3. Sınıf"
-    analiz_sonucu = analyzer.analiz_et(
-        video_yolu=video_yolu,
-        egitim_seviyesi=seviye,
-        sinif_duzeyi=sinif_hedef,
-        rag_baglami=rag_baglami,
-        video_basligi=video_basligi,
-    )
-
-    bolumler = analiz_sonucu.get("bolumler", [])
-    sinif = analiz_sonucu.get("sinif_duzeyi", "3. Sınıf")
-    ders = analiz_sonucu.get("ders_adi", "Fen Bilimleri")
-
-    # Kareleri analiz öncesi fiziksel olarak diske çıkart (görsel modelin okuyabilmesi için)
-    if video_yolu and os.path.exists(video_yolu):
-        try:
-            processor = VideoProcessor()
-            bolumler = processor.bolum_karelerini_isle(video_yolu, bolumler)
-            analiz_sonucu["bolumler"] = bolumler
-        except Exception as e:
-            print(f"[UYARI] Kare çıkarma ön adımı sırasında hata: {e}")
-
-    # -----------------------------------------------------------------------
-    # GÖRSEL VE İŞİTSEL İÇERİKLERİN BİRLİKTE ANALİZİ & ÇOK YÖNLÜ 3D RAG
-    # -----------------------------------------------------------------------
     rag = RAGMotoru()
     print(f"\n[Multimodal & 3D RAG] {len(bolumler)} bölüm için görsel analiz ve konu uygunluk denetimi başlatılıyor...")
 
@@ -239,7 +186,7 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
     for bolum in bolumler:
         b_no = bolum.get("bolum_no", 1)
         b_baslik = bolum.get("bolum_basligi", "")
-        b_transkript = bolum.get("transkript", "")
+        b_transkript = analyzer.transkript_filtrele(bolum.get("transkript", ""))
         kare_yolu = bolum.get("ekran_goruntusu_yolu") or ""
         zaman_aralik = bolum.get("zaman_araligi")
         zaman_metni = bolum.get("zaman_araligi_metni") or (
@@ -257,7 +204,13 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
         bolum["gorsel_unsurlar"] = gorsel_sonuc.get("gorsel_unsurlar", [])
         bolum["gorsel_aciklamasi"] = gorsel_sonuc.get("gorsel_aciklamasi", "")
         bolum["gorsel_konusma_uyumu"] = gorsel_sonuc.get("gorsel_konusma_uyumu", {})
-        bolum["temel_konu"] = gorsel_sonuc.get("temel_konu") or b_baslik
+        konu = (gorsel_sonuc.get("temel_konu") or "").strip()
+        if konu == b_baslik:
+            konu = ""
+        if konu:
+            b_baslik = konu
+            bolum["bolum_basligi"] = konu
+        bolum["temel_konu"] = konu or b_transkript[:180] or b_baslik
         bolum["alt_kavramlar"] = gorsel_sonuc.get("alt_kavramlar", [])
         bolum["gorsel_analiz_kaynagi"] = gorsel_sonuc.get("gorsel_analiz_kaynagi", "bilinmiyor")
 
@@ -288,11 +241,21 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
             "olcme_degerlendirme": rag_sonuc["olcme_degerlendirme"]["baglam"]
         }
 
-        if rag_sonuc.get("en_iyi_referans") and rag_sonuc.get("kaynak_destek_durumu") != "destek_yok":
-            bolum["kitap_referansi"] = rag_sonuc["en_iyi_referans"]
-        elif not bolum.get("kitap_referansi") or bolum.get("kitap_referansi") == "MEB Ders Kitabı Referansı":
-            bolum["kitap_referansi"] = rag_sonuc.get("en_iyi_referans") or "Doğrulanmış RAG eşleşmesi bulunamadı"
-        bolum["rag_kaynaklari"] = rag_sonuc.get("tum_kaynaklar", [])
+        kaynaklar = rag_sonuc.get("tum_kaynaklar", [])
+        bolum["rag_kaynaklari"] = kaynaklar
+        sentez_baglami = bolum["rag_3d"]["bilgi"][:1000] + "\n" + bolum["rag_3d"]["pedagoji"][:700]
+        kaynak = next(
+            (
+                k for k in kaynaklar
+                if k.get("kaynak_rolu") == "ana_kaynak"
+                and k.get("kitap_adi") and k.get("has_printed_page") and k.get("printed_page") is not None
+                and k.get("referans") and k["referans"] in sentez_baglami
+            ),
+            None,
+        )
+        bolum["kitap_referansi"] = (
+            f"{kaynak['kitap_adi']}, basılı sayfa {kaynak['printed_page']}" if kaynak else ""
+        )
 
         # Sadece doğrulanmış parçaları genel kaynakça havuzuna ekle
         for k_item in rag_sonuc.get("tum_kaynaklar", []):
@@ -303,7 +266,8 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
     # -----------------------------------------------------------------------
     # AŞAMA 2: PEDAGOJİK HARMANLAMA VE DERİN KONU ANLATIMI SENTEZİ
     # -----------------------------------------------------------------------
-    print(f"\n[Pedagojik Sentez] 10 bölüm için öğretmen anlatımı, görsel açıklaması ve MEB ders kitabı harmanlanıyor...")
+    print(f"\n[Pedagojik Sentez] {len(bolumler)} bölüm için öğretmen anlatımı, görsel açıklaması ve MEB ders kitabı harmanlanıyor...")
+    gorulen_kavramlar = set()
     for bolum in bolumler:
         analyzer.bolum_pedagojik_sentezle(
             bolum=bolum,
@@ -312,6 +276,18 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
             ders=ders,
             egitim_seviyesi=seviye
         )
+        if bolum.get("kaynak_tipi") == "transkript":
+            bolum["kitap_referansi"] = ""
+
+        yeni_kavramlar = []
+        for kavram in bolum.get("onemli_kavramlar") or []:
+            if not isinstance(kavram, dict):
+                continue
+            ad = " ".join(str(kavram.get("kavram") or "").casefold().split())
+            if ad and ad not in gorulen_kavramlar:
+                gorulen_kavramlar.add(ad)
+                yeni_kavramlar.append(kavram)
+        bolum["onemli_kavramlar"] = yeni_kavramlar
 
         # Standart ortak veri yapısı alanlarını güvenceye al
         b_no = bolum.get("bolum_no", 1)
@@ -324,24 +300,40 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
             bolum["kare_zamani"] = float(30 * b_no)
 
     analiz_sonucu["tum_kaynaklar"] = tum_dogrulanmis_kaynaklar
+    model_kaynaklari = {b.get("kaynak_tipi") for b in bolumler}
+    if len(model_kaynaklari) == 1:
+        analiz_sonucu["uretim_kaynagi"] = next(iter(model_kaynaklari))
+    else:
+        analiz_sonucu["uretim_kaynagi"] = "karma"
     return {"video_analizi": analiz_sonucu}
 
 
 def ffmpeg_kare_dugumu(state: EduFrameState) -> Dict[str, Any]:
-    """Ekrandaki her eğitim materyali için zaman damgalı kareleri yakalar."""
-    print("\n[LangGraph: ffmpeg_kare] Materyal değişim kareleri FFmpeg ile alınıyor...")
+    """Gerçek medya üzerinden bölüm, kare ve konuşma zamanlarını oluşturur."""
     video_bilgisi = state.get("video_bilgisi") or {}
-    video_yolu = video_bilgisi.get("file_path", "")
-    video_analizi = state.get("video_analizi") or {}
-    bolumler = video_analizi.get("bolumler", [])
+    video_yolu = video_bilgisi.get("file_path")
+    if not video_yolu or not Path(video_yolu).is_file():
+        raise EksikDersKaresiHatasi(state.get("hata") or "Video dosyası açılamadı.")
 
-    processor = VideoProcessor()
-    guncel_bolumler = processor.bolum_karelerini_isle(video_yolu, bolumler)
+    processor = VideoProcessor(Path(mkdtemp(prefix="fasikul_", dir=FRAMES_DIR)))
+    transkript_yolu = processor.transkript_olustur(video_yolu)
+    bolumler = processor.otomatik_ekran_degisimlerini_bul(
+        video_yolu, transkript_yolu=transkript_yolu
+    )
+    bolumler = processor.transkript_ile_eslestir(bolumler, transkript_yolu)
+    if not any(b.get("transkript") for b in bolumler):
+        raise EksikDersKaresiHatasi("PDF üretilemedi. Videoda eşleşen ders konuşması bulunamadı.")
+    PDFGenerator.ders_karelerini_dogrula(bolumler)
 
-    video_analizi_guncel = dict(video_analizi)
-    video_analizi_guncel["bolumler"] = guncel_bolumler
-
-    return {"video_analizi": video_analizi_guncel}
+    return {
+        "video_analizi": {
+            "bolumler": bolumler,
+            "unite_basligi": (video_bilgisi.get("title") or "Video Dersi").replace("_", " "),
+            "egitim_seviyesi": state.get("egitim_seviyesi", DEFAULT_SEVIYE),
+            "sinif_duzeyi": state.get("sinif_duzeyi") or "3. Sınıf",
+            "ders_adi": "Fen Bilimleri",
+        }
+    }
 
 
 def soru_uret_dugumu(state: EduFrameState) -> Dict[str, Any]:
@@ -421,16 +413,16 @@ def create_eduframe_graph():
     workflow.add_edge("bilgi_sorgusu", END)
 
     # PDF işleme boru hattı akışı
-    workflow.add_edge("video_indir", "rag_baglam")
+    workflow.add_edge("video_indir", "ffmpeg_kare")
+    workflow.add_edge("ffmpeg_kare", "rag_baglam")
     workflow.add_edge("rag_baglam", "gemini_analiz")
-    workflow.add_edge("gemini_analiz", "ffmpeg_kare")
 
     # Soru seçeneğine göre koşullu geçiş
     def soru_eklensin_mi_kontrol(state: EduFrameState) -> str:
         return "soru_uret" if state.get("soru_eklensin_mi", False) else "pdf_rapor"
 
     workflow.add_conditional_edges(
-        "ffmpeg_kare",
+        "gemini_analiz",
         soru_eklensin_mi_kontrol,
         {
             "soru_uret": "soru_uret",
@@ -456,6 +448,7 @@ class EduFrameAgenticCore:
         video_kaynagi: Optional[str] = None,
         egitim_seviyesi: str = DEFAULT_SEVIYE,
         soru_eklensin_mi: bool = False,
+        sinif_duzeyi: Optional[str] = None,
     ) -> EduFrameState:
         """
         Grafı verilen girdilerle baştan sona işletir ve nihai durumu döner.
@@ -465,6 +458,7 @@ class EduFrameAgenticCore:
             "video_kaynagi": video_kaynagi,
             "egitim_seviyesi": egitim_seviyesi,
             "soru_eklensin_mi": soru_eklensin_mi,
+            "sinif_duzeyi": sinif_duzeyi,
         }
         return self.graph.invoke(baslangic_state)
 

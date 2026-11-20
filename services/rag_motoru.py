@@ -554,8 +554,8 @@ class RAGMotoru:
         tr_lower = (transkript or "")[:400].lower()
         all_concepts = [k.lower() for k in (alt_kavramlar or [])]
 
-        is_elektrik_baglami = any(w in temel_lower or any(w in c for c in all_concepts) or w in tr_lower for w in ["elektrik", "pil", "batarya", "akü", "santral", "enerji"])
-        ilgisiz_uniteler = ["besinlerimiz", "kuvvetin etkileri", "maddenin özellikleri", "maddeyi tanıyalım", "canlılar dünyası", "yer kabuğu", "toprağı tanıyorum", "yaşam alanları"]
+        is_elektrik_baglami = any(w in temel_lower or any(w in c for c in all_concepts) or w in tr_lower for w in ["elektrik", "pil", "batarya", "akü", "santral"])
+        ilgisiz_uniteler = ["besinlerimiz", "kuvvetin etkileri", "hareketi keşfediyorum", "maddenin özellikleri", "maddeyi tanıyalım", "canlılar dünyası", "yer kabuğu", "toprağı tanıyorum", "yaşam alanları"]
 
         if is_elektrik_baglami and any(iu in unite_lower for iu in ilgisiz_uniteler):
             return {
@@ -913,6 +913,7 @@ class RAGMotoru:
         self,
         egitim_seviyesi: str,
         k: int = 3,
+        sinif: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         KATI KURAL (Few-Shot Soru Klonlama):
@@ -933,7 +934,7 @@ class RAGMotoru:
         gorulen_metinler = set()
 
         for ifade in soru_arama_ifadeleri:
-            docs = self.seviye_filtreli_arama(sorgu=ifade, egitim_seviyesi=egitim_seviyesi, k=2)
+            docs = self.seviye_filtreli_arama(sorgu=ifade, egitim_seviyesi=egitim_seviyesi, sinif=sinif, k=2)
             for doc in docs:
                 metin = doc.page_content.strip()
                 # Soru işaretleri, parantezler veya şıklar içeren kısımları tercih et

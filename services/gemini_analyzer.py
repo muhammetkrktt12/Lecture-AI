@@ -25,6 +25,7 @@ import json
 import time
 import base64
 import requests
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -129,14 +130,17 @@ class GeminiAnalyzer:
         if not ham_metin:
             return ""
         metin = ham_metin.strip()
-        giris_desenleri = [
-            r"^(sevgili\s+öğrenciler\s*[,!]?\s*)?(merhaba\s+(arkadaşlar|öğrenciler)?\s*[,!]?\s*)?",
-            r"^(kanalımıza\s+hoş\s+geldiniz\s*[,!]?\s*)?",
-            r"^(3\.\s*sınıf\s+fen\s+bilimleri\s+dersimize\s+hoş\s+geldiniz\s*[,!]?\s*)?",
-            r"^(bugünkü\s+konumuz\s+[a-zA-ZçğıöşüÇĞİÖŞÜ\s]+\s*[\.!]?\s*)?"
-        ]
-        for p in giris_desenleri:
-            metin = re.sub(p, "", metin, flags=re.IGNORECASE).strip()
+        giris = re.compile(
+            r"^(?:"
+            r"(?:herkese\s+)?merhaba(?:lar)?\b(?:[ ,]+(?:sevgili\s+)?(?:arkadaşlar|öğrenciler|üçüncü\s+sınıflar))?"
+            r"|sevgili\s+(?:arkadaşlar|öğrenciler)\b"
+            r"|(?:evet[ ,]+)?(?:bugün\s+)?nasılsınız(?:\s+bakalım)?\b"
+            r"|(?:kanalımıza|(?:3\.\s*sınıf\s+)?fen\s+bilimleri\s+dersimize)\s+hoş\s+geldiniz\b"
+            r")[,.!?\s]*",
+            re.IGNORECASE,
+        )
+        while eslesme := giris.match(metin):
+            metin = metin[eslesme.end():]
 
         cikis_desenleri = [
             r"(kanalımıza\s+)?abone\s+olmayı\s+unutmayın\s*[\.!]?",
@@ -146,7 +150,7 @@ class GeminiAnalyzer:
         for p in cikis_desenleri:
             metin = re.sub(p, "", metin, flags=re.IGNORECASE).strip()
 
-        return metin if len(metin) > 15 else ham_metin.strip()
+        return metin.strip()
 
     @classmethod
     def pedagojik_anlatim_normallestir(cls, metin: str) -> str:
@@ -318,12 +322,15 @@ class GeminiAnalyzer:
 
         return None
 
-    def _ollama_tekil_sentez(self, istemi: str, timeout: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def _ollama_tekil_sentez(
+        self, istemi: str, timeout: Optional[int] = None, num_predict: Optional[int] = None
+    ) -> Optional[Dict[str, Any]]:
         """Ollama ile tek bir bölüm için odaklı pedagojik sentez."""
         if self._ollama_devre_disi:
             return None
 
         tout = timeout or self.ollama_section_timeout
+        token_siniri = num_predict or self.ollama_section_num_predict
         try:
             payload = {
                 "model": self.ollama_model,
@@ -333,7 +340,7 @@ class GeminiAnalyzer:
                 "think": False,
                 "options": {
                     "num_thread": 16,
-                    "num_predict": self.ollama_section_num_predict,
+                    "num_predict": token_siniri,
                     "temperature": 0.2
                 }
             }
@@ -342,7 +349,7 @@ class GeminiAnalyzer:
                 data = res.json()
                 done_reason = data.get("done_reason")
                 if done_reason == "length":
-                    print(f" -> [UYARI] Ollama bölüm sentezi token sınırına ulaştı (done_reason=length, num_predict={self.ollama_section_num_predict}).")
+                    print(f" -> [UYARI] Ollama bölüm sentezi token sınırına ulaştı (done_reason=length, num_predict={token_siniri}).")
                 metin = data.get("response", "").strip()
                 if not metin:
                     print(" -> [UYARI] Ollama bölüm sentezi boş yanıt döndürdü (response boş).")
@@ -552,14 +559,18 @@ GÖRSEL SAHNE VE MATERYAL ANALİZİ:
 - Ekranda Görülen Unsurlar: {', '.join(gorsel_unsurlar) if gorsel_unsurlar else 'Eğitim illüstrasyonu'}
 - Görselin Açıklaması: {gorsel_aciklamasi or 'Konuyla ilgili şema'}
 
-VİDEODAKİ DERS ANLATIMI VE BİLİMSEL İÇERİK:
-\"{temiz_transkript}\"
+VİDEODAKİ ORİJİNAL KONUŞMA:
+\"{ham_transkript}\"
 
 MEB DERS KİTABI BAĞLAMI VE KAZANIMLARI:
 \"{kitap_bg}\"
 
 GÖREV:
 Yukarıdaki görsel analizini, ders anlatımındaki bilimsel bilgileri ve MEB ders kitabı bağlamını sentezleyerek bu bölüm için nesnel, açıklayıcı, ders kitabı üslubunda bir "Düzenlenmiş Konu Anlatımı" yaz.
+
+Orijinal konuşma alanında yalnızca bağlamdan açıkça anlaşılabilen ses tanıma hatalarını düzelt.
+Cümlelerin sırasını, öğretmenin hitabını ve verdiği örnekleri koru. Kitap bilgisi ekleme veya özetleme.
+Şüpheli kelimeleri olduğu gibi bırak. Görsel, konuşmayı anlamana yardım edebilir.
 
 KATI PEDAGOJİK VE ÜSLUP KURALLARI:
 1. ÜSLUP VE ŞAHIS (EN KRİTİK KURAL):
@@ -568,61 +579,67 @@ KATI PEDAGOJİK VE ÜSLUP KURALLARI:
    - Sınıf içi yönergeler, konuşma başlatıcılar ve etkileşimli ifadeler ("bugünkü dersimizde", "önce şu örnekle başlayalım", "sınıf arkadaşlarımızla tartışalım", "merak ettiğimiz soruları aşağıdaki alana yazalım", "hadi bakalım", "kemerlerinizi bağlayın", "sevgili öğrenciler") KESİNLİKLE METİNDE YER ALMAYACAKTIR.
 2. PEDAGOJİK DERİNLİK VE GÖRSEL ENTEGRASYONU:
    - Görsel yalnızca bir süs değildir; konu anlatımı görseldeki cihaz/şema/karakterin ne yaptığını ve çalışma prensibini açıklamalıdır.
-   - Konunun tanımını, çalışma mantığını, neden-sonuç ilişkilerini ve enerji dönüşümünü {sinif} ({egitim_seviyesi}, 8-10 yaş) öğrencisinin bilişsel düzeyine uygun, açık ve net cümlelerle açıkla.
+   - Bölümün esas konusunu {sinif} ({egitim_seviyesi}) öğrencisine uygun, en fazla 5 açık cümleyle anlat. Selamlaşmaları ve dolgu ifadelerini anlatıma alma.
 3. HARMANLANMIŞ ÖRNEKLER (ornekler):
-   - Hem videodaki öğretmenin somut örneklerini ("koken": "video"), hem MEB ders kitabındaki örnekleri ("koken": "ders_kitabi"), hem de günlük yaşamdan ek pekiştirici bir örneği ("koken": "yapay_zeka") yapılandır.
+   - Gerekirse en fazla iki kısa örnek ver. Yalnızca videodan ve verilen kitap bağlamından yararlan.
 4. ÖNEMLİ KAVRAMLAR VE AÇIKLAMALARI (onemli_kavramlar):
-   - Her kavram için 2-3 cümlelik kapsamlı ve derin pedagojik tanım oluştur (tanım, çalışma mantığı/enerji dönüşümü, günlük yaşamdaki kullanım/güvenlik kuralı).
+   - Bölümde açıklanan en fazla üç kavramı birer cümleyle tanımla. Yoksa boş liste ver.
 
 ÇIKTI FORMATI:
 SADECE aşağıdaki JSON nesnesini döndür:
 {{
+  "bolum_basligi": "Yalnızca bu bölümün içeriğini anlatan kısa Türkçe başlık",
+  "orijinal_transkript": "Öğretmenin yalnızca belirgin ses tanıma hataları düzeltilmiş konuşması.",
   "duzenlenmis_anlatim": "Nesnel, 3. tekil şahıs ders kitabı diliyle yazılmış, görseli ve çalışma mekanizmasını açıklayan derin konu anlatımı.",
   "ornekler": [
     {{"ornek": "Örnek Adı", "aciklama": "Kısa çalışma ve kullanım açıklaması", "koken": "video"}},
-    {{"ornek": "Örnek Adı", "aciklama": "Ders kitabındaki kullanım açıklaması", "koken": "ders_kitabi"}},
-    {{"ornek": "Örnek Adı", "aciklama": "Günlük yaşam pekiştirme açıklaması", "koken": "yapay_zeka"}}
+    {{"ornek": "Örnek Adı", "aciklama": "Ders kitabındaki kullanım açıklaması", "koken": "ders_kitabi"}}
   ],
   "onemli_kavramlar": [
     {{"kavram": "Kavram Adı", "aciklama": "2-3 cümlelik kapsamlı ve açıklayıcı pedagojik tanım"}}
   ]
 }}"""
 
-        # 1. Tercih: Yerel Ollama
-        veri = self._ollama_tekil_sentez(istemi, timeout=self.ollama_section_timeout)
-        if veri and "duzenlenmis_anlatim" in veri and len(veri["duzenlenmis_anlatim"]) > 60:
-            print(f" -> [Bölüm {b_no}] Ollama ile pedagojik harmanlama ve zenginleştirme tamamlandı.")
-            bolum["duzenlenmis_anlatim"] = self.pedagojik_anlatim_normallestir(veri["duzenlenmis_anlatim"])
-            bolum["pedagojik_anlatim"] = bolum["duzenlenmis_anlatim"]
-            if "onemli_kavramlar" in veri and veri["onemli_kavramlar"]:
-                bolum["onemli_kavramlar"] = veri["onemli_kavramlar"]
-            if "ornekler" in veri and veri["ornekler"]:
-                bolum["ornekler"] = veri["ornekler"]
-            bolum["kaynak_tipi"] = "ollama"
-            return bolum
+        token_siniri = max(
+            self.ollama_section_num_predict, min(1600, 450 + 3 * len(ham_transkript.split()))
+        )
+        veri = self._ollama_tekil_sentez(
+            istemi, timeout=self.ollama_section_timeout, num_predict=token_siniri
+        )
+        kaynak = "ollama"
+        anlatim = (veri or {}).get("duzenlenmis_anlatim")
+        if not isinstance(anlatim, str) or not anlatim.strip():
+            if self._api_anahtari_var_mi():
+                veri = self._gemini_rest_sentez(istemi, timeout=self.gemini_timeout)
+                kaynak = "gemini"
+                anlatim = (veri or {}).get("duzenlenmis_anlatim")
 
-        # 2. Tercih: Google Gemini REST
-        if self._api_anahtari_var_mi():
-            veri = self._gemini_rest_sentez(istemi, timeout=self.gemini_timeout)
-            if veri and "duzenlenmis_anlatim" in veri and len(veri["duzenlenmis_anlatim"]) > 60:
-                print(f" -> [Bölüm {b_no}] Gemini API ile pedagojik harmanlama ve zenginleştirme tamamlandı.")
-                bolum["duzenlenmis_anlatim"] = self.pedagojik_anlatim_normallestir(veri["duzenlenmis_anlatim"])
-                bolum["pedagojik_anlatim"] = bolum["duzenlenmis_anlatim"]
-                if "onemli_kavramlar" in veri and veri["onemli_kavramlar"]:
-                    bolum["onemli_kavramlar"] = veri["onemli_kavramlar"]
-                if "ornekler" in veri and veri["ornekler"]:
-                    bolum["ornekler"] = veri["ornekler"]
-                bolum["kaynak_tipi"] = "gemini"
-                return bolum
-
-        # 3. Güvenlik Ağı: Zengin pedagojik içeriği koru
-        print(f" -> [Bölüm {b_no}] Yerel/API sentez yanıt vermedi; zengin pedagojik fasikül metni devrede.")
-        if "duzenlenmis_anlatim" in bolum:
-            bolum["duzenlenmis_anlatim"] = self.pedagojik_anlatim_normallestir(bolum["duzenlenmis_anlatim"])
+        if isinstance(anlatim, str) and anlatim.strip():
+            baslik = veri.get("bolum_basligi")
+            if isinstance(baslik, str) and baslik.strip() and len(baslik) <= 100:
+                bolum["bolum_basligi"] = baslik.strip()
+            bolum["duzenlenmis_anlatim"] = self.pedagojik_anlatim_normallestir(anlatim)
             bolum["pedagojik_anlatim"] = bolum["duzenlenmis_anlatim"]
-        if "kaynak_tipi" not in bolum:
-            bolum["kaynak_tipi"] = "rag_fallback"
+            for alan in ("onemli_kavramlar", "ornekler"):
+                if isinstance(veri.get(alan), list) and veri[alan]:
+                    bolum[alan] = veri[alan]
+            duzeltilmis = veri.get("orijinal_transkript")
+            if ham_transkript and isinstance(duzeltilmis, str) and duzeltilmis.strip():
+                benzerlik = SequenceMatcher(
+                    None, ham_transkript.casefold().split(), duzeltilmis.casefold().split(), autojunk=False
+                ).ratio()
+                if benzerlik >= 0.8:
+                    bolum["transkript"] = duzeltilmis.strip()
+            bolum["kaynak_tipi"] = kaynak
+        else:
+            mevcut = bolum.get("duzenlenmis_anlatim")
+            metin = mevcut or temiz_transkript
+            anlatim = self.pedagojik_anlatim_normallestir(metin) if mevcut else metin
+            bolum["duzenlenmis_anlatim"] = anlatim
+            bolum["pedagojik_anlatim"] = anlatim
+            bolum.setdefault("kaynak_tipi", "rag_fallback" if mevcut else "transkript")
         return bolum
+
 
     def _ollama_ile_analiz_et(self, sistem_istemi: str, timeout: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """1. Tercih: Yerel Ollama modeli (qwen3.5:4b) ile analiz."""
