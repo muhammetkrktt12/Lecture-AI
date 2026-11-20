@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import List, Dict, Any, Optional, Tuple
 
 try:
@@ -130,7 +131,8 @@ class VideoProcessor:
             return None
 
         if not self.ffmpeg_yolu:
-            return self._yer_tutucu_kare(zaman_saniye, cikti_dosya_adi)
+            print("[UYARI] FFmpeg bulunamadı; kare çıkarılamadı.")
+            return None
 
         zaman_str = self.saniyeden_zaman_damgasi(zaman_saniye).replace(":", "m") + "s"
         if not cikti_dosya_adi:
@@ -138,46 +140,28 @@ class VideoProcessor:
 
         hedef = self.frames_dizini / cikti_dosya_adi
 
-        komut = [
-            self.ffmpeg_yolu,
-            "-ss", str(zaman_saniye),
-            "-i", str(video.resolve()),
-            "-frames:v", "1",
-            "-q:v", "2",
-            str(hedef.resolve()),
-            "-y"
-        ]
-
         try:
-            subprocess.run(
-                komut,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            )
-            if hedef.exists() and hedef.stat().st_size > 0:
-                print(f"[VideoProcessor] Materyal Karesi Alındı: {hedef.name} ({self.saniyeden_zaman_damgasi(zaman_saniye)})")
-                return str(hedef.resolve())
-        except Exception as e:
+            with TemporaryDirectory(dir=self.frames_dizini) as gecici_dizin:
+                gecici_kare = Path(gecici_dizin) / "kare.jpg"
+                subprocess.run(
+                    [
+                        self.ffmpeg_yolu, "-y", "-ss", str(zaman_saniye),
+                        "-i", str(video.resolve()), "-frames:v", "1",
+                        "-q:v", "2", str(gecici_kare.resolve()),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                    timeout=30,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                if gecici_kare.is_file() and gecici_kare.stat().st_size > 0:
+                    gecici_kare.replace(hedef)
+                    print(f"[VideoProcessor] Materyal Karesi Alındı: {hedef.name} ({self.saniyeden_zaman_damgasi(zaman_saniye)})")
+                    return str(hedef.resolve())
+        except (OSError, subprocess.SubprocessError) as e:
             print(f"[HATA] Kare yakalama hatası ({zaman_saniye}s): {e}")
-
-        return self._yer_tutucu_kare(zaman_saniye, cikti_dosya_adi)
-
-    def _yer_tutucu_kare(self, zaman_saniye: float, cikti_dosya_adi: Optional[str]) -> str:
-        """Görsel yakalanamadığında kullanılacak güvenli yer tutucu JPEG."""
-        if not cikti_dosya_adi:
-            cikti_dosya_adi = f"yer_tutucu_{int(zaman_saniye):04d}.jpg"
-        hedef = self.frames_dizini / cikti_dosya_adi
-        if not hedef.exists():
-            minimal_jpg = bytes.fromhex(
-                "ffd8ffe000104a46494600010101004800480000ffdb004300080606070605080707070909080a0c"
-                "140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27"
-                "393d38323c2e333432ffc0000b080001000101011100ffc4001f0000010501010101010100000000"
-                "000000000102030405060708090a0bffda0008010100003f007f00ffd9"
-            )
-            hedef.write_bytes(minimal_jpg)
-        return str(hedef.resolve())
+        return None
 
     def _en_temiz_kare_zamani_bul(
         self,
@@ -187,7 +171,7 @@ class VideoProcessor:
         varsayilan_kare_sn: float,
         idx: int = 1,
         onceki_kare_yollari: Optional[List[str]] = None,
-    ) -> float:
+    ) -> Optional[float]:
         """
         Öğretmenin elinin, kolunun veya başka bir engelin ekrandaki materyali
         kapatmadığı en temiz ve engelsiz saniyeyi akıllı görüntü analiziyle belirler.
@@ -298,22 +282,10 @@ class VideoProcessor:
                     return False
                 return False
 
-            if is_first_video:
-                if idx == 9:
-                    # Bölüm 9 Eşleştirme Tablosudur; kesinlikle 435.0 saniyeden sonraya (Öğrendiklerimiz slaytına) kayamaz
-                    bitis = min(bitis, 435.0)
-                    if varsayilan_kare_sn > 435.0:
-                        varsayilan_kare_sn = 415.0
-                elif idx == 10:
-                    # Bölüm 10 Öğrendiklerimiz Özeti slaytıdır; kesinlikle 514.0 saniyeden sonraya ('Abone Ol!' ekranına) kayamaz
-                    bitis = min(bitis, 514.0)
-                    if varsayilan_kare_sn >= 515.0:
-                        varsayilan_kare_sn = 510.0
-
             test_fname = f"check_obstruction_{idx}.jpg"
             test_path = self.kare_yakala(video_yolu, varsayilan_kare_sn, cikti_dosya_adi=test_fname)
             if not test_path or not os.path.exists(test_path):
-                return varsayilan_kare_sn
+                return None
 
             varsayilan_skor, el_sayisi, el_kapatiyor = _engel_ve_el_skoru(test_path)
             varsayilan_mukerrer = _oncekiyle_ayni_mi(test_path)
@@ -338,14 +310,16 @@ class VideoProcessor:
             adaylar = [varsayilan_kare_sn]
             for offset in [2.0, -2.0, 4.0, -4.0, 6.0, -6.0, 8.0, -8.0, 10.0, -10.0, 12.0, -12.0, 16.0, -16.0]:
                 t = varsayilan_kare_sn + offset
-                if baslangic <= t <= bitis:
+                if baslangic <= t < bitis:
                     adaylar.append(t)
+            if bitis > baslangic:
+                adaylar.extend(baslangic + (bitis - baslangic) * pay / 8 for pay in range(1, 8))
 
-            en_iyi_t = varsayilan_kare_sn
-            en_dusuk_engel = 999.0
+            en_iyi_t = None
+            en_dusuk_engel = float('inf')
 
-            for t in sorted(list(set([round(x, 1) for x in adaylar]))):
-                cand_fname = f"cand_{idx}_{int(t)}.jpg"
+            for t in sorted(set(adaylar)):
+                cand_fname = f"cand_{idx}_{t:.3f}.jpg"
                 cand_p = self.kare_yakala(video_yolu, t, cikti_dosya_adi=cand_fname)
                 if cand_p and os.path.exists(cand_p):
                     if _reklam_kitabi_mi(cand_p, t):
@@ -355,18 +329,21 @@ class VideoProcessor:
                     if _oncekiyle_ayni_mi(cand_p):
                         continue # Önceki slaytla mükerrer olan adayları ele
                     cand_skor, cand_el, cand_kapatiyor = _engel_ve_el_skoru(cand_p)
-                    if cand_skor < en_dusuk_engel:
+                    if not cand_kapatiyor and cand_skor <= 0.09 and cand_skor < en_dusuk_engel:
                         en_dusuk_engel = cand_skor
                         en_iyi_t = t
                     if not cand_kapatiyor and cand_skor <= 0.04:
                         print(f" -> MediaPipe onaylı temiz ve özgün kare bulundu: {t}s (El: {cand_el}, Skor: {cand_skor:.3f})")
                         return t
 
+            if en_iyi_t is None:
+                print(f"[UYARI] Bölüm {idx}: Uygun temiz kare bulunamadı.")
+                return None
             print(f" -> En temiz ve özgün kare seçildi: {en_iyi_t}s (Engel Skoru: {en_dusuk_engel:.3f})")
             return en_iyi_t
         except Exception as e:
             print(f"[UYARI] Akıllı kare seçimi hatası: {e}")
-            return varsayilan_kare_sn
+            return None
 
     def bolum_karelerini_isle(
         self,
@@ -409,8 +386,10 @@ class VideoProcessor:
             b_kopya["zaman_araligi_metni"] = aralik_str
 
             # Ekran görüntüsü al
-            dosya_adi = f"bolum_{idx:02d}_{int(kare_sn):04d}s.jpg"
-            kare_yolu = self.kare_yakala(video_yolu, kare_sn, cikti_dosya_adi=dosya_adi)
+            kare_yolu = None
+            if kare_sn is not None:
+                dosya_adi = f"bolum_{idx:02d}_{int(kare_sn):04d}s.jpg"
+                kare_yolu = self.kare_yakala(video_yolu, kare_sn, cikti_dosya_adi=dosya_adi)
 
             # Eğer Bölüm 7 ise ve sol marjinde ticari kitap reklamı varsa kırp:
             if idx == 7 and kare_yolu and os.path.exists(kare_yolu):
@@ -436,7 +415,8 @@ class VideoProcessor:
         video_yolu: str,
         ornekleme_adimi: float = 2.5,
         ssim_esigi: float = 0.58,
-        min_materyal_suresi: float = 16.0
+        min_materyal_suresi: float = 16.0,
+        transkript_yolu: Optional[Path] = None,
     ) -> List[Dict[str, Any]]:
         """
         Videoyu baştan sona tarayarak ekrandaki anlamlı görsel materyal değişimlerini tespit eder.
@@ -444,6 +424,8 @@ class VideoProcessor:
         ve el jestlerini aynı materyal olarak korur.
         Tespit edilen her materyal için MediaPipe destekli en temiz ve engelsiz kareyi çıkarır.
         """
+        if ornekleme_adimi <= 0:
+            raise ValueError("Örnekleme adımı pozitif olmalıdır.")
         if not os.path.exists(video_yolu):
             print(f"[UYARI] Video dosyası bulunamadı: {video_yolu}")
             return []
@@ -463,7 +445,7 @@ class VideoProcessor:
         print(f"\n[VideoProcessor] Video Analizi Başlıyor: {Path(video_yolu).name} (Süre: {toplam_sure:.1f}s, FPS: {fps:.2f})")
         print(f"[VideoProcessor] Slayt Değişimi Taraması (Örnekleme: {ornekleme_adimi}s, SSIM Eşiği: {ssim_esigi}, Min Süre: {min_materyal_suresi}s)...")
 
-        def _hesapla_ssim(img1: np.ndarray, img2: np.ndarray) -> float:
+        def _hesapla_ssim(img1: np.ndarray, img2: np.ndarray, ust_bolge: bool = False) -> float:
             C1 = (0.01 * 255) ** 2
             C2 = (0.03 * 255) ** 2
             im1 = img1.astype(float)
@@ -477,7 +459,7 @@ class VideoProcessor:
             sigma2_sq = cv2.GaussianBlur(im2 ** 2, (11, 11), 1.5) - mu2_sq
             sigma12 = cv2.GaussianBlur(im1 * im2, (11, 11), 1.5) - mu1_mu2
             ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
-            return float(np.mean(ssim_map))
+            return float(np.mean(ssim_map[:45] if ust_bolge else ssim_map))
 
         # 1. Aşama: Slayt Geçiş Noktalarını Belirleme
         gecis_noktalari = [0.0]
@@ -507,20 +489,32 @@ class VideoProcessor:
 
         cap.release()
 
-        # Son bitiş saniyesini ekle
-        if gecis_noktalari[-1] < toplam_sure - 5.0:
-            gecis_noktalari.append(round(toplam_sure, 1))
+        if toplam_sure > gecis_noktalari[-1]:
+            gecis_noktalari.append(toplam_sure)
 
-        print(f"[VideoProcessor] Toplam {len(gecis_noktalari)-1} dinamik eğitim materyali aralığı tespit edildi.")
+        araliklar = list(zip(gecis_noktalari, gecis_noktalari[1:]))
+        if transkript_yolu is not None:
+            satirlar = self._transkript_satirlarini_oku(transkript_yolu)
+            for reklam_baslangic, reklam_bitis in self._ders_disi_araliklar(satirlar):
+                kalan = []
+                for baslangic, bitis in araliklar:
+                    if bitis <= reklam_baslangic or baslangic >= reklam_bitis:
+                        kalan.append((baslangic, bitis))
+                        continue
+                    if baslangic < reklam_baslangic:
+                        kalan.append((baslangic, reklam_baslangic))
+                    if bitis > reklam_bitis:
+                        kalan.append((reklam_bitis, bitis))
+                araliklar = kalan
+
+        print(f"[VideoProcessor] Kare seçimine alınan aralık sayısı: {len(araliklar)}")
 
         # 2. Aşama: Her Aralık İçin MediaPipe ile En Temiz Kareyi Alma ve Bölüm Oluşturma
         bolumler: List[Dict[str, Any]] = []
-        onceki_kareler: List[str] = []
 
-        for idx in range(len(gecis_noktalari) - 1):
-            baslangic_sn = gecis_noktalari[idx]
-            bitis_sn = gecis_noktalari[idx + 1]
-            varsayilan_kare = round((baslangic_sn + bitis_sn) / 2.0, 1)
+        video_etiketi = Path(video_yolu).stem
+        for idx, (baslangic_sn, bitis_sn) in enumerate(araliklar):
+            varsayilan_kare = (baslangic_sn + bitis_sn) / 2.0
 
             # MediaPipe + engel analizi ile en temiz kareyi bul
             temiz_kare_sn = self._en_temiz_kare_zamani_bul(
@@ -529,14 +523,13 @@ class VideoProcessor:
                 bitis=bitis_sn,
                 varsayilan_kare_sn=varsayilan_kare,
                 idx=idx + 1,
-                onceki_kare_yollari=onceki_kareler
             )
 
             # Ekran görüntüsü al
-            dosya_adi = f"bolum_{idx+1:02d}_{int(temiz_kare_sn):04d}s.jpg"
-            kare_yolu = self.kare_yakala(video_yolu, temiz_kare_sn, cikti_dosya_adi=dosya_adi)
-            if kare_yolu:
-                onceki_kareler.append(kare_yolu)
+            kare_yolu = None
+            if temiz_kare_sn is not None:
+                dosya_adi = f"{video_etiketi}_bolum_{idx+1:02d}_{int(temiz_kare_sn):04d}s.jpg"
+                kare_yolu = self.kare_yakala(video_yolu, temiz_kare_sn, cikti_dosya_adi=dosya_adi)
 
             baslangic_str = self.saniyeden_zaman_damgasi(baslangic_sn)
             bitis_str = self.saniyeden_zaman_damgasi(bitis_sn)
@@ -561,34 +554,69 @@ class VideoProcessor:
             }
             bolumler.append(bolum_verisi)
 
-        # 3. Aşama: Aynı Materyale Ait Alt Aralıkları Birleştirme (SSIM > 0.52)
+        # 3. Aşama: Komşu aralıklarda kalıcı materyali birden fazla kareyle karşılaştır.
         if len(bolumler) > 1:
+            karsilastirma = cv2.VideoCapture(str(video_yolu))
+
+            def _ornekler(bolum):
+                aralik = bolum["zaman_araligi"]
+                baslangic, bitis = aralik["baslangic_saniye"], aralik["bitis_saniye"]
+                kareler = []
+                yol = bolum.get("ekran_goruntusu_yolu")
+                if yol:
+                    kare = cv2.imread(yol)
+                    if kare is not None:
+                        kareler.append(cv2.cvtColor(cv2.resize(kare, (160, 90)), cv2.COLOR_BGR2GRAY))
+                for pay in (0.25, 0.50, 0.75, 0.90):
+                    karsilastirma.set(cv2.CAP_PROP_POS_MSEC, (baslangic + (bitis - baslangic) * pay) * 1000)
+                    ok, kare = karsilastirma.read()
+                    if ok:
+                        kareler.append(cv2.cvtColor(cv2.resize(kare, (160, 90)), cv2.COLOR_BGR2GRAY))
+                return kareler
+
             birlestirilmis: List[Dict[str, Any]] = []
             curr = bolumler[0]
+            curr_ornekler = _ornekler(curr)
 
             for nxt in bolumler[1:]:
-                ayni_slayt = False
-                curr_p = curr.get("ekran_goruntusu_yolu")
-                nxt_p = nxt.get("ekran_goruntusu_yolu")
-                if curr_p and nxt_p and os.path.exists(curr_p) and os.path.exists(nxt_p):
-                    try:
-                        im1 = cv2.cvtColor(cv2.resize(cv2.imread(curr_p), (160, 90)), cv2.COLOR_BGR2GRAY)
-                        im2 = cv2.cvtColor(cv2.resize(cv2.imread(nxt_p), (160, 90)), cv2.COLOR_BGR2GRAY)
-                        sc = _hesapla_ssim(im1, im2)
-                        if sc > 0.52:
-                            ayni_slayt = True
-                    except Exception:
-                        pass
+                nxt_ornekler = _ornekler(nxt)
+                bitisik = curr["zaman_araligi"]["bitis_saniye"] == nxt["zaman_araligi"]["baslangic_saniye"]
+                # Önceki aralığın son örneği yeni materyalin ilk görüntüsü olabilir.
+                referanslar = curr_ornekler[:-1]
+                eslesmeler = [
+                    any(_hesapla_ssim(eski, yeni) > 0.80 for eski in referanslar)
+                    for yeni in nxt_ornekler
+                ] if bitisik else []
+                ayni_slayt = sum(eslesmeler) >= 2
+                if ayni_slayt:
+                    son_kare = nxt_ornekler[-1]
+                    # Yazı eklenmesi tam kare benzerliğini düşürse de üstteki içerik kalabilir.
+                    ayni_slayt = eslesmeler[-1] or any(
+                        _hesapla_ssim(eski, son_kare) >= 0.64
+                        and _hesapla_ssim(eski, son_kare, ust_bolge=True) >= 0.78
+                        for eski in referanslar
+                    )
+                if bitisik and not ayni_slayt and any(eslesmeler):
+                    # Bir geçiş anındaki tek kare yerine yeni aralığın iki geç örneğini doğrula.
+                    ayni_slayt = len(nxt_ornekler) >= 4 and all(
+                        any(_hesapla_ssim(eski, yeni) > 0.80 for eski in curr_ornekler)
+                        for yeni in nxt_ornekler[-2:]
+                    )
 
                 # Eğer aynı slaytsa aralıkları birleştir
                 if ayni_slayt:
+                    if not curr["ekran_goruntusu_yolu"]:
+                        curr["ekran_goruntusu_yolu"] = nxt["ekran_goruntusu_yolu"]
+                        curr["zaman_araligi"]["kare_zamani"] = nxt["zaman_araligi"]["kare_zamani"]
                     curr["zaman_araligi"]["bitis"] = nxt["zaman_araligi"]["bitis"]
                     curr["zaman_araligi"]["bitis_saniye"] = nxt["zaman_araligi"]["bitis_saniye"]
                     curr["zaman_araligi_metni"] = f"{curr['zaman_araligi']['baslangic']} – {nxt['zaman_araligi']['bitis']}"
                 else:
                     birlestirilmis.append(curr)
                     curr = nxt
+                    curr_ornekler = nxt_ornekler
             birlestirilmis.append(curr)
+            karsilastirma.release()
 
             # Bölüm numaralarını yeniden diz
             for idx, b in enumerate(birlestirilmis, 1):
@@ -661,6 +689,54 @@ class VideoProcessor:
         print(f"[VideoProcessor] Transkript başarıyla oluşturuldu ve kaydedildi: {cikti_p.name}")
         return cikti_p
 
+    @staticmethod
+    def _transkript_satirlarini_oku(yol: Path) -> List[Tuple[float, float, str]]:
+        satirlar = []
+        for satir in Path(yol).read_text(encoding="utf-8-sig").splitlines():
+            eslesme = re.fullmatch(r"\[(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\]\s*(.+)", satir.strip())
+            if eslesme:
+                baslangic, bitis, metin = eslesme.groups()
+                satirlar.append((float(baslangic), float(bitis), metin))
+        return satirlar
+
+    @staticmethod
+    def _ders_disi_araliklar(satirlar: List[Tuple[float, float, str]]) -> List[Tuple[float, float]]:
+        metinler = [metin.lower() for _, _, metin in satirlar]
+        araliklar = []
+        reklam_baslangic = None
+        satin_alma = re.compile(r"kırtasiye|gidip.{0,30}(?:almaya|ulaşabilirsiniz)|kitaplara ulaşabilirsiniz")
+        tanitim = re.compile(r"başucu kitap|soru bankası kitab|kitaplarımızdan sorular çözüyoruz")
+        ders_donusu = re.compile(r"hemen çözelim|kaç tanesi|ortak özellikleri|dersimize başlayalım")
+        kapanis = re.compile(r"abone ol|like (?:tuş|düş|dış)|bildirimleri aç")
+        odul = re.compile(r"ödüllü sayfa|sayfaya hemen yönlendirelim")
+
+        for i, (baslangic, bitis, _) in enumerate(satirlar):
+            metin = metinler[i]
+            if kapanis.search(metin):
+                ilk = i
+                while ilk > 0 and odul.search(metinler[ilk - 1]):
+                    ilk -= 1
+                araliklar.append((satirlar[ilk][0], float("inf")))
+                break
+
+            if reklam_baslangic is None and tanitim.search(metin):
+                yakin_metinler = (
+                    sonraki for (st, _, _), sonraki in zip(satirlar[i:], metinler[i:])
+                    if st - baslangic <= 100
+                )
+                if any(satin_alma.search(sonraki) for sonraki in yakin_metinler):
+                    reklam_baslangic = baslangic
+            if reklam_baslangic is not None and satin_alma.search(metin):
+                donus = next((
+                    (st, et, sonraki) for (st, et, _), sonraki in zip(satirlar[i+1:], metinler[i+1:])
+                    if st - bitis <= 20 and ders_donusu.search(sonraki)
+                ), None)
+                if donus:
+                    bitis = donus[1] if "dersimize başlayalım" in donus[2] or "hemen çözelim" in donus[2] else donus[0]
+                araliklar.append((reklam_baslangic, bitis))
+                reklam_baslangic = None
+        return araliklar
+
     def transkript_ile_eslestir(
         self,
         bolumler: List[Dict[str, Any]],
@@ -680,12 +756,7 @@ class VideoProcessor:
         satirlar: List[Tuple[float, float, str]] = []
 
         if isinstance(transkript_kaynagi, (str, Path)) and os.path.exists(str(transkript_kaynagi)):
-            with open(str(transkript_kaynagi), "r", encoding="utf-8") as f:
-                for line in f:
-                    m = re.match(r"\[(\d+\.?\d*)\s*-\s*(\d+\.?\d*)\]\s*(.*)", line.strip())
-                    if m:
-                        st, et, txt = float(m.group(1)), float(m.group(2)), m.group(3).strip()
-                        satirlar.append((st, et, txt))
+            satirlar = self._transkript_satirlarini_oku(Path(transkript_kaynagi))
         elif isinstance(transkript_kaynagi, list):
             for item in transkript_kaynagi:
                 if isinstance(item, dict):
@@ -702,39 +773,27 @@ class VideoProcessor:
 
         print(f"[VideoProcessor] {len(satirlar)} Whisper parçası {len(bolumler)} görsel bölüme dağıtılıyor...")
 
-        for b in bolumler:
-            b_sn_start = float(b["zaman_araligi"].get("baslangic_saniye", 0.0))
-            b_sn_end = float(b["zaman_araligi"].get("bitis_saniye", 99999.0))
+        eslesenler = [[] for _ in bolumler]
+        for st, et, txt in satirlar:
+            en_iyi = None
+            en_fazla_ortusme = 0.0
+            for idx, bolum in enumerate(bolumler):
+                aralik = bolum["zaman_araligi"]
+                baslangic = float(aralik.get("baslangic_saniye", 0.0))
+                bitis = float(aralik.get("bitis_saniye", 99999.0))
+                ortusme = min(et, bitis) - max(st, baslangic)
+                if ortusme >= en_fazla_ortusme and ortusme > 0:
+                    en_iyi = idx
+                    en_fazla_ortusme = ortusme
+            if en_iyi is not None:
+                eslesenler[en_iyi].append((st, et, txt))
 
-            uygun_metinler: List[str] = []
-            ilk_konusma_sn: Optional[float] = None
-            son_konusma_sn: Optional[float] = None
-
-            for st, et, txt in satirlar:
-                # Transkript parçası bu bölümün zaman penceresine denk geliyor mu?
-                if (b_sn_start - 1.0) <= st < b_sn_end:
-                    uygun_metinler.append(txt)
-                    if ilk_konusma_sn is None:
-                        ilk_konusma_sn = st
-                    son_konusma_sn = et
-
-            if uygun_metinler:
-                b["transkript"] = " ".join(uygun_metinler)
-                if ilk_konusma_sn is not None and son_konusma_sn is not None:
-                    b["konusma_zaman_araligi"] = f"[{ilk_konusma_sn:.2f} - {son_konusma_sn:.2f}]"
+        for bolum, eslesen in zip(bolumler, eslesenler):
+            bolum["transkript"] = " ".join(metin for _, _, metin in eslesen)
+            if eslesen:
+                bolum["konusma_zaman_araligi"] = f"[{eslesen[0][0]:.2f} - {eslesen[-1][1]:.2f}]"
             else:
-                b["transkript"] = ""
-                b["konusma_zaman_araligi"] = f"[{b_sn_start:.2f} - {b_sn_end:.2f}]"
-
-        # Eğer son bölüm tamamen YouTube abone ol/like kapanışından ibaretse ve ders içeriği yoksa elenir:
-        if len(bolumler) > 1:
-            son = bolumler[-1]
-            txt_son = son.get("transkript", "").lower()
-            if any(w in txt_son for w in ["abone ol", "like tuş", "ödüllü soru", "ödüllü sayfa"]) and len(txt_son) < 300:
-                ders_kelimeleri = ["enerji", "elektrik", "kaynak", "devre", "batarya", "akü", "santral", "besin", "fırın", "çamaşır"]
-                if not any(k in txt_son for k in ders_kelimeleri):
-                    print(f"[VideoProcessor] Video sonundaki saf YouTube outro ekranı ({son['zaman_araligi_metni']}) elendi.")
-                    bolumler.pop()
+                bolum.pop("konusma_zaman_araligi", None)
 
         # Bölüm numaralarını ve başlıklarını garantiye al
         for idx, b in enumerate(bolumler, 1):
