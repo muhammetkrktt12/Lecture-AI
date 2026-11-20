@@ -50,6 +50,7 @@ from reportlab.platypus import (
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from PIL import Image as PILImage
 
 try:
     from config import ROOT, OUTPUTS_DIR
@@ -127,6 +128,10 @@ class NumberedCanvas(canvas.Canvas):
 # ---------------------------------------------------------------------------
 # ANA PDF ÜRETİCİ SINIF
 # ---------------------------------------------------------------------------
+class EksikDersKaresiHatasi(ValueError):
+    """Bir ders bölümünün PDF'ye eklenebilecek karesi yok."""
+
+
 class PDFGenerator:
     """
     RAG, Transkript ve Ekran Karelerini kurumsal ders fasikülü PDF'ine dönüştürür.
@@ -539,6 +544,30 @@ class PDFGenerator:
         """
         Görsel materyal değişimlerine dayalı 14 sayfalık tam teşekküllü kurumsal PDF fasikülünü üretir.
         """
+        bolumler = video_analizi.get("bolumler") or []
+        if not bolumler:
+            raise EksikDersKaresiHatasi("PDF üretilemedi. Görseli olan ders bölümü bulunamadı.")
+
+        eksik_kareler = []
+        for idx, bolum in enumerate(bolumler, 1):
+            kare_yolu = bolum.get("ekran_goruntusu_yolu")
+            try:
+                if not kare_yolu:
+                    raise FileNotFoundError()
+                with PILImage.open(kare_yolu) as kare:
+                    kare.load()
+                    if min(kare.size) <= 1:
+                        raise ValueError("Yer tutucu görsel")
+            except (OSError, ValueError):
+                baslik = bolum.get("bolum_basligi") or f"Bölüm {idx}"
+                zaman = bolum.get("zaman_araligi_metni") or "zaman aralığı bilinmiyor"
+                eksik_kareler.append(f"{baslik} ({zaman})")
+        if eksik_kareler:
+            raise EksikDersKaresiHatasi(
+                "PDF üretilemedi. Okunabilir ekran görüntüsü eksik olan bölümler\n"
+                + "\n".join(f"- {bolum}" for bolum in eksik_kareler)
+            )
+
         ders_adi = (video_analizi.get("ders_adi") or "FEN BİLİMLERİ").upper()
         ham_unite = video_analizi.get("unite_basligi") or "Elektrikli Araçlar ve Elektrik Kaynakları"
         unite_basligi = self._temizle_dosya_yolu(ham_unite)
@@ -579,7 +608,6 @@ class PDFGenerator:
         # ===================================================================
         # SAYFA 1 - 10: HER GÖRSEL MATERYAL İÇİN BÖLÜM SAYFASI
         # ===================================================================
-        bolumler = video_analizi.get("bolumler", [])
         for idx, bolum in enumerate(bolumler, start=1):
             if idx > 1:
                 flowables.append(PageBreak())
@@ -617,15 +645,10 @@ class PDFGenerator:
             flowables.append(Spacer(1, 5))
 
             # Ekran Görüntüsü
-            kare_yolu = bolum.get("ekran_goruntusu_yolu")
-            if kare_yolu and os.path.exists(kare_yolu) and os.path.getsize(kare_yolu) > 200:
-                try:
-                    img = Image(kare_yolu, width=470, height=180)
-                    img.hAlign = "CENTER"
-                    flowables.append(img)
-                    flowables.append(Spacer(1, 5))
-                except Exception as e:
-                    print(f"[UYARI] Görsel PDF'e eklenemedi: {e}")
+            img = Image(bolum["ekran_goruntusu_yolu"], width=470, height=180)
+            img.hAlign = "CENTER"
+            flowables.append(img)
+            flowables.append(Spacer(1, 5))
 
             # Transkript Kutusu (Öğretmenin Ham Konuşması)
             ham_transkript = bolum.get("transkript", "")

@@ -27,6 +27,7 @@ from config import (
     VIDEOS_DIR,
 )
 from core.eduframe_agentic_core import EduFrameAgenticCore
+from services.pdf_generator import EksikDersKaresiHatasi
 from services.rag_motoru import RAGMotoru
 from services.video_processor import VideoProcessor
 
@@ -191,12 +192,17 @@ with tab_video:
                 st.write("7️⃣ ReportLab: Gerçek kurumsal PDF fasikülü derleniyor...")
 
                 core = EduFrameAgenticCore()
-                sonuc_state = core.calistir(
-                    kullanici_girisi=f"{secilen_sinif} ders notunu çıkar",
-                    video_kaynagi=video_kaynagi,
-                    egitim_seviyesi=secilen_seviye,
-                    soru_eklensin_mi=soru_tercihi
-                )
+                try:
+                    sonuc_state = core.calistir(
+                        kullanici_girisi=f"{secilen_sinif} ders notunu çıkar",
+                        video_kaynagi=video_kaynagi,
+                        egitim_seviyesi=secilen_seviye,
+                        soru_eklensin_mi=soru_tercihi
+                    )
+                except EksikDersKaresiHatasi as hata:
+                    status.update(label="Ders fasikülü üretilemedi", state="error", expanded=True)
+                    st.error(str(hata))
+                    st.stop()
                 status.update(label="Ders Fasikülü Başarıyla Üretildi!", state="complete", expanded=False)
 
             # --- ÇIKTILARI GÖSTER ---

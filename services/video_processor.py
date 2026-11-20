@@ -223,28 +223,6 @@ class VideoProcessor:
             is_first_video = "1EPox1m2MPQ" in str(video_yolu) or "Elektrik Kaynakları" in str(video_yolu)
             is_arac_gerecler = "J9_yr257Jog" in str(video_yolu) or "Elektrikli Araç" in str(video_yolu)
 
-            def _reklam_kitabi_mi(img_p: str, t_sn: float = 0.0) -> bool:
-                """Videoda reklamı yapılan ticari test kitabını tespit edip eler."""
-                # İlk 45 saniyedeki kapak ve giriş çizimleri kitap olamaz
-                if t_sn < 45.0:
-                    return False
-                if is_first_video and (140.0 <= t_sn <= 200.0):
-                    return True
-                if is_arac_gerecler and (45.0 <= t_sn <= 118.0):
-                    return True
-                try:
-                    im = Image.open(img_p).convert('RGB')
-                    arr = np.array(im)
-                    h, w, _ = arr.shape
-                    bot = arr[int(h*0.85):, :]
-                    has_green = np.mean((bot[:,:,1] > 80) & (bot[:,:,1] > bot[:,:,0] + 20) & (bot[:,:,1] > bot[:,:,2] + 20)) > 0.08
-                    spine = arr[:, w//2 - 6 : w//2 + 6]
-                    has_spine = np.mean(spine) < np.mean(arr) - 10
-                    # Kitap olabilmesi için hem yeşil altlık hem ortadaki cilt dikişinin birlikte olması gerekir
-                    return has_green and has_spine
-                except Exception:
-                    return False
-
             def _abone_ol_outro_mu(img_p: str, t_sn: float = 0.0) -> bool:
                 """Videodaki 'Abone Ol!' ve YouTube outro kısımlarını eler."""
                 if is_first_video and t_sn >= 515.0:
@@ -289,16 +267,13 @@ class VideoProcessor:
 
             varsayilan_skor, el_sayisi, el_kapatiyor = _engel_ve_el_skoru(test_path)
             varsayilan_mukerrer = _oncekiyle_ayni_mi(test_path)
-            varsayilan_reklam = _reklam_kitabi_mi(test_path, varsayilan_kare_sn)
             varsayilan_outro = _abone_ol_outro_mu(test_path, varsayilan_kare_sn)
 
-            # Eğer varsayılan kare hem mükerrer/reklam/outro değilse hem de el engeli yoksa doğrudan kullan
-            if not varsayilan_mukerrer and not varsayilan_reklam and not varsayilan_outro and not el_kapatiyor and varsayilan_skor <= 0.09:
+            # Eğer varsayılan kare hem mükerrer/outro değilse hem de el engeli yoksa doğrudan kullan
+            if not varsayilan_mukerrer and not varsayilan_outro and not el_kapatiyor and varsayilan_skor <= 0.09:
                 return varsayilan_kare_sn
 
-            if varsayilan_reklam:
-                print(f"[VideoProcessor] Bölüm {idx}: Reklam/ürün tanıtımı tespit edildi, filtreleniyor...")
-            elif varsayilan_outro:
+            if varsayilan_outro:
                 print(f"[VideoProcessor] Bölüm {idx}: 'Abone Ol' outro ekranı tespit edildi, filtreleniyor...")
             elif varsayilan_mukerrer:
                 print(f"[VideoProcessor] Bölüm {idx}: Varsayılan kare önceki bölümlerle mükerrer çıktı! Alternatif temiz slayt taranıyor...")
@@ -318,23 +293,31 @@ class VideoProcessor:
             en_iyi_t = None
             en_dusuk_engel = float('inf')
 
-            for t in sorted(set(adaylar)):
-                cand_fname = f"cand_{idx}_{t:.3f}.jpg"
-                cand_p = self.kare_yakala(video_yolu, t, cikti_dosya_adi=cand_fname)
-                if cand_p and os.path.exists(cand_p):
-                    if _reklam_kitabi_mi(cand_p, t):
-                        continue # Reklam içeren kareleri ele
-                    if _abone_ol_outro_mu(cand_p, t):
-                        continue # 'Abone Ol!' outro içeren kareleri ele
-                    if _oncekiyle_ayni_mi(cand_p):
-                        continue # Önceki slaytla mükerrer olan adayları ele
-                    cand_skor, cand_el, cand_kapatiyor = _engel_ve_el_skoru(cand_p)
-                    if not cand_kapatiyor and cand_skor <= 0.09 and cand_skor < en_dusuk_engel:
-                        en_dusuk_engel = cand_skor
-                        en_iyi_t = t
-                    if not cand_kapatiyor and cand_skor <= 0.04:
-                        print(f" -> MediaPipe onaylı temiz ve özgün kare bulundu: {t}s (El: {cand_el}, Skor: {cand_skor:.3f})")
-                        return t
+            sure = max(0.0, bitis - baslangic)
+            ornek_sayisi = min(120, max(1, int(sure * 2)))
+            sik_adaylar = {
+                baslangic + sure * (i + 0.5) / ornek_sayisi
+                for i in range(ornek_sayisi)
+            } if sure else set()
+            ilk_adaylar = set(adaylar)
+            for taranacak in (sorted(ilk_adaylar), sorted(sik_adaylar - ilk_adaylar)):
+                if en_iyi_t is not None:
+                    break
+                for t in taranacak:
+                    cand_fname = f"cand_{idx}_{t:.3f}.jpg"
+                    cand_p = self.kare_yakala(video_yolu, t, cikti_dosya_adi=cand_fname)
+                    if cand_p and os.path.exists(cand_p):
+                        if _abone_ol_outro_mu(cand_p, t):
+                            continue # 'Abone Ol!' outro içeren kareleri ele
+                        if _oncekiyle_ayni_mi(cand_p):
+                            continue # Önceki slaytla mükerrer olan adayları ele
+                        cand_skor, cand_el, cand_kapatiyor = _engel_ve_el_skoru(cand_p)
+                        if not cand_kapatiyor and cand_skor <= 0.09 and cand_skor < en_dusuk_engel:
+                            en_dusuk_engel = cand_skor
+                            en_iyi_t = t
+                        if not cand_kapatiyor and cand_skor <= 0.04:
+                            print(f" -> MediaPipe onaylı temiz ve özgün kare bulundu: {t}s (El: {cand_el}, Skor: {cand_skor:.3f})")
+                            return t
 
             if en_iyi_t is None:
                 print(f"[UYARI] Bölüm {idx}: Uygun temiz kare bulunamadı.")
@@ -704,9 +687,9 @@ class VideoProcessor:
         metinler = [metin.lower() for _, _, metin in satirlar]
         araliklar = []
         reklam_baslangic = None
-        satin_alma = re.compile(r"kırtasiye|gidip.{0,30}(?:almaya|ulaşabilirsiniz)|kitaplara ulaşabilirsiniz")
-        tanitim = re.compile(r"başucu kitap|soru bankası kitab|kitaplarımızdan sorular çözüyoruz")
-        ders_donusu = re.compile(r"hemen çözelim|kaç tanesi|ortak özellikleri|dersimize başlayalım")
+        satin_alma = re.compile(r"kırtasiye|gidip.{0,40}(?:almaya|ulaşabilirsiniz)|kitaplara ulaşabilirsiniz")
+        tanitim = re.compile(r"başucu kitap|soru bankası kitab|kitaplarımızdan sorular çözüyoruz|dersler kitabımızı alacağız")
+        ders_donusu = re.compile(r"hemen çözelim|kaç tanesi|ortak özellikleri|dersimize başlayalım|doğru yanlış olanlara")
         kapanis = re.compile(r"abone ol|like (?:tuş|düş|dış)|bildirimleri aç")
         odul = re.compile(r"ödüllü sayfa|sayfaya hemen yönlendirelim")
 
@@ -727,6 +710,16 @@ class VideoProcessor:
                 if any(satin_alma.search(sonraki) for sonraki in yakin_metinler):
                     reklam_baslangic = baslangic
             if reklam_baslangic is not None and satin_alma.search(metin):
+                # Tanıtımın ortasında bir satın alma çağrısı geçebilir.
+                sonraki_cagri = False
+                for (st, _, _), sonraki in zip(satirlar[i+1:], metinler[i+1:]):
+                    if st - bitis > 45 or ders_donusu.search(sonraki):
+                        break
+                    if satin_alma.search(sonraki):
+                        sonraki_cagri = True
+                        break
+                if sonraki_cagri:
+                    continue
                 donus = next((
                     (st, et, sonraki) for (st, et, _), sonraki in zip(satirlar[i+1:], metinler[i+1:])
                     if st - bitis <= 20 and ders_donusu.search(sonraki)
