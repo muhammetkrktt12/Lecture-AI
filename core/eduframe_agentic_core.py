@@ -270,6 +270,7 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
             if not analyzer.gemini_fasikul_bolumu_uret(
                 bolum, sinif, gemini_adaylari[idx], sorted(gorulen_kavramlar),
                 onbellek_dizini=TEMP_DIR / "gemini_bolum_onbellek",
+                egitim_seviyesi=seviye,
             ):
                 raise GeminiFasikulHatasi(
                     f"Gemini bölümü tamamlayamadı: {bolum['bolum_basligi']} "

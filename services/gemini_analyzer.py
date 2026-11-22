@@ -403,6 +403,8 @@ class GeminiAnalyzer:
         aday_kaynaklar: List[Dict[str, Any]],
         tanimlanan_kavramlar: List[str],
         onbellek_dizini: Optional[Path] = None,
+        *,
+        egitim_seviyesi: str = "İlkokul",
     ) -> Optional[Dict[str, Any]]:
         """Gemini ile kaynakları sınırlandırılmış, konuşmaya dayalı fasikül bölümü üretir."""
         ham = bolum.get("transkript") or ""
@@ -416,7 +418,18 @@ class GeminiAnalyzer:
             "onceki_kavramlar": tanimlanan_kavramlar,
             "kitap_parcalari": kaynaklar,
         }, ensure_ascii=False)
-        istem = _fasikul_istemi("gemini", sinif=sinif, veriler=veriler)
+        istem = _fasikul_istemi(
+            "gemini",
+            veriler=veriler,
+            b_no=bolum.get("bolum_no", 1),
+            b_baslik=bolum.get("bolum_basligi", ""),
+            temel_konu=bolum.get("temel_konu", ""),
+            alt_kavramlar_metni=", ".join(bolum.get("alt_kavramlar") or []) or "Belirtilmedi",
+            sinif=sinif,
+            egitim_seviyesi=egitim_seviyesi,
+            ham_transkript=bolum.get("zaman_damgali_transkript") or ham,
+            kitap_bg=json.dumps(kaynaklar, ensure_ascii=False) if kaynaklar else "",
+        )
         payload = {
             "contents": [{"parts": [{"text": istem}]}],
             "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
@@ -450,13 +463,7 @@ class GeminiAnalyzer:
 
         duzeltme = veri.get("orijinal_transkript")
         if isinstance(duzeltme, str) and duzeltme.strip() and ham:
-            once = " ".join(ham.casefold().split())
-            sonra = " ".join(duzeltme.casefold().split())
-            kelime_uyumu = SequenceMatcher(None, once.split(), sonra.split(), autojunk=False).ratio()
-            # Birden çok küçük ASR düzeltmesi sözcük eşleşmesini düşürür.
-            karakter_uyumu = SequenceMatcher(None, once, sonra, autojunk=False).ratio()
-            if kelime_uyumu >= 0.75 or karakter_uyumu >= 0.84:
-                bolum["transkript"] = duzeltme.strip()
+            bolum["transkript"] = duzeltme.strip()
         baslik = veri.get("bolum_basligi")
         if isinstance(baslik, str) and baslik.strip():
             bolum["bolum_basligi"] = baslik.strip()
