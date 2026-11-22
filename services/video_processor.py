@@ -735,6 +735,8 @@ class VideoProcessor:
         self,
         bolumler: List[Dict[str, Any]],
         transkript_kaynagi: Any,
+        *,
+        zaman_damgalarini_koru: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Dinamik olarak tespit edilen görsel materyal bölümlerini,
@@ -784,6 +786,11 @@ class VideoProcessor:
 
         for bolum, eslesen in zip(bolumler, eslesenler):
             bolum["transkript"] = " ".join(metin for _, _, metin in eslesen)
+            if zaman_damgalarini_koru:
+                bolum["zaman_damgali_transkript"] = "\n".join(
+                    f"[{baslangic:.2f} - {bitis:.2f}] {metin}"
+                    for baslangic, bitis, metin in eslesen
+                )
             if eslesen:
                 bolum["konusma_zaman_araligi"] = f"[{eslesen[0][0]:.2f} - {eslesen[-1][1]:.2f}]"
             else:

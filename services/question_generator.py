@@ -428,6 +428,7 @@ SADECE geçerli bir JSON nesnesi döndür."""
         egitim_seviyesi: str = "İlkokul",
         rag_soru_ornekleri: Optional[List[Dict[str, Any]]] = None,
         soru_sayisi: int = 10,
+        yalniz_gemini: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Kullanıcının belirlediği eğitim seviyesine ve öğrenilen kavramlara tam uyumlu
@@ -441,7 +442,7 @@ SADECE geçerli bir JSON nesnesi döndür."""
         istem = self._soru_istemi_olustur(video_analizi, egitim_seviyesi, soru_sayisi)
 
         # 1. Aşama: Yerel Ollama (qwen3.5:4b)
-        ai_sorulari = self._ollama_ile_soru_uret(istem)
+        ai_sorulari = None if yalniz_gemini else self._ollama_ile_soru_uret(istem)
         if ai_sorulari:
             for q in ai_sorulari:
                 q["kaynak_tipi"] = "ollama"
@@ -455,6 +456,9 @@ SADECE geçerli bir JSON nesnesi döndür."""
                 for q in ai_sorulari:
                     q["kaynak_tipi"] = "gemini"
                 return self._rag_kaynaklarini_bagla(ai_sorulari, video_analizi, rag_soru_ornekleri, varsayilan_kaynak_tipi="gemini")
+
+        if yalniz_gemini:
+            return []
 
         # 3. Aşama: Güvenlik Ağı - Pedagojik Şablon Bankası
         print("[BİLGİ] Yapay zeka servislerine ulaşılamadı. Müfredat uyumlu standart soru bankası devreye alınıyor...")

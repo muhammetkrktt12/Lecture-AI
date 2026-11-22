@@ -19,7 +19,6 @@ import os
 import json
 import unittest
 from unittest.mock import patch, MagicMock
-from pathlib import Path
 
 import requests
 
@@ -676,72 +675,6 @@ class TestAIIntegrationAndCitations(unittest.TestCase):
         self.assertNotIn("Bugünkü dersimizde birlikte keşfedeceğiz.", sonuc["duzenlenmis_anlatim"])
         self.assertNotIn("Sınıf arkadaşlarımızla tartışalım.", sonuc["duzenlenmis_anlatim"])
         self.assertIn("Pil, az miktarda elektrik enerjisi harcayan küçük araçları çalıştırmak için kullanılır.", sonuc["duzenlenmis_anlatim"])
-
-    # -----------------------------------------------------------------------
-    # SENARYO 19: Multimodal Görsel Materyal Analizi ve Unsur Tespiti
-    # -----------------------------------------------------------------------
-    @patch("services.gemini_analyzer.GeminiAnalyzer._gemini_api_cagir")
-    def test_scenario_19_visual_material_analysis_multimodal(self, mock_gemini):
-        mock_gemini.return_value = {
-            "gorsel_unsurlar": ["Uzaktan kumandalı mavi araba", "Kumanda", "Çocuk"],
-            "gorsel_aciklamasi": "Görselde pille çalışan uzaktan kumandalı bir oyuncak araba yer almaktadır.",
-            "gorsel_konusma_uyumu": {
-                "uyumlu_mu": True,
-                "derece": "tam_uyumlu",
-                "gerekce": "Transkriptteki oyuncak araba ve pil konusu görselle örtüşmektedir."
-            },
-            "temel_konu": "Elektrik Kaynakları ve Pilin Önemi",
-            "alt_kavramlar": ["Pil", "Elektrik enerjisi"]
-        }
-
-        # Geçici gerçek bir test resmi oluştur
-        test_img_path = Path("temp_medya/test_kare_senaryo19.jpg")
-        test_img_path.parent.mkdir(parents=True, exist_ok=True)
-        test_img_path.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 600)  # Geçerli JPEG başlığı
-
-        try:
-            analyzer = GeminiAnalyzer(api_key="AIzaValidDummyKeyForTest123456789")
-            res = analyzer.gorsel_materyali_analiz_et(
-                resim_yolu=str(test_img_path),
-                zaman_damgasi="00:50",
-                transkript="Gördüğünüz gibi arkadaşımız uzaktan kumandalı arabasıyla oynuyor.",
-                bolum_basligi="Oyuncak Araba ve Pil"
-            )
-
-            self.assertEqual(res["gorsel_analiz_kaynagi"], "gemini_multimodal_vision")
-            self.assertIn("Uzaktan kumandalı mavi araba", res["gorsel_unsurlar"])
-            self.assertTrue(res["gorsel_konusma_uyumu"]["uyumlu_mu"])
-            self.assertEqual(res["temel_konu"], "Elektrik Kaynakları ve Pilin Önemi")
-        finally:
-            if test_img_path.exists():
-                test_img_path.unlink()
-
-        # Resim mevcut olmadığında güvenli hata yönetimi
-        res_yok = analyzer.gorsel_materyali_analiz_et(
-            resim_yolu="olmayan_dosya.jpg",
-            bolum_basligi="Test"
-        )
-        self.assertEqual(res_yok["gorsel_analiz_kaynagi"], "goruntu_yok")
-        self.assertFalse(res_yok["gorsel_konusma_uyumu"]["uyumlu_mu"])
-
-    # -----------------------------------------------------------------------
-    # SENARYO 20: Görsel Model Başarısızlığında Dürüst Raporlama (Uydurma Nesne Yasağı)
-    # -----------------------------------------------------------------------
-    def test_scenario_20_visual_speech_alignment_verification(self):
-        analyzer = GeminiAnalyzer(api_key="")
-        res = analyzer._sezgisel_gorsel_analiz(
-            resim_yolu="ornek.jpg",
-            zaman_damgasi="00:50",
-            transkript="Uzaktan kumandalı araba pil bitince durdu.",
-            bolum_basligi="Pil ve Oyuncak Araba"
-        )
-        self.assertIn("gorsel_konusma_uyumu", res)
-        uyum = res["gorsel_konusma_uyumu"]
-        self.assertIsNone(uyum["uyumlu_mu"])
-        self.assertEqual(uyum["derece"], "belirsiz")
-        self.assertEqual(res["gorsel_unsurlar"], [])
-        self.assertEqual(res["gorsel_analiz_kaynagi"], "dogrulanamadi")
-        self.assertIn("doğrulanamadı", res["gorsel_aciklamasi"].lower())
 
     # -----------------------------------------------------------------------
     # SENARYO 21: Çok Yönlü RAG Arama ve Uygunluk Filtresi (Alakasız Parça Eleme)

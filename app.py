@@ -31,6 +31,7 @@ from config import (
 )
 from core.eduframe_agentic_core import EduFrameAgenticCore
 from services.pdf_generator import EksikDersKaresiHatasi
+from services.gemini_analyzer import GeminiFasikulHatasi
 from services.rag_motoru import RAGMotoru
 from services.video_processor import VideoProcessor
 
@@ -187,6 +188,7 @@ with tab_video:
             video_kaynagi = str(ornek_mevcut.resolve())
 
     st.markdown("---")
+    anlatim_modeli = st.radio("Fasikül anlatım modeli", ["Ollama", "Gemini"], horizontal=True)
     calistir_btn = st.button("🚀 Ekran Değişimlerini İncele ve PDF Ders Fasikülünü Bas", type="primary", use_container_width=True)
 
     if calistir_btn:
@@ -209,9 +211,10 @@ with tab_video:
                         video_kaynagi=video_kaynagi,
                         egitim_seviyesi=secilen_seviye,
                         sinif_duzeyi=secilen_sinif,
+                        anlatim_modeli=anlatim_modeli.lower(),
                         soru_eklensin_mi=soru_tercihi
                     )
-                except EksikDersKaresiHatasi as hata:
+                except (EksikDersKaresiHatasi, GeminiFasikulHatasi) as hata:
                     status.update(label="Ders fasikülü üretilemedi", state="error", expanded=True)
                     st.error(str(hata))
                     st.stop()

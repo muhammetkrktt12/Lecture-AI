@@ -17,6 +17,7 @@ class EduFrameState(TypedDict, total=False):
     video_kaynagi: Optional[str]            # YouTube URL'si veya yerel .mp4 dosya yolu
     egitim_seviyesi: str                    # 'İlkokul' | 'Ortaokul' | 'Lise' | 'Üniversite'
     sinif_duzeyi: Optional[str]             # Arayüzden seçilen sınıf
+    anlatim_modeli: str                     # 'ollama' | 'gemini'
     soru_eklensin_mi: bool                  # Değerlendirme soruları oluşturulsun mu?
 
     # --- Orkestrasyon Kararı ---
