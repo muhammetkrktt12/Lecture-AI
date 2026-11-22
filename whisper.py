@@ -17,9 +17,11 @@ if os.name == "nt" and cuda_dizinleri:
 from faster_whisper import WhisperModel
 
 video_yolu = Path(r"D:\AIVideoLessonAnalyzer\temp_medya\video_1EPox1m2MPQ.mp4")
-cikti_yolu = video_yolu.with_suffix(".transkript.txt")
+cikti_yolu = video_yolu.with_suffix(".large-v3-turbo.transkript.txt")
 
-model = WhisperModel("small", device="cuda", compute_type="float16")
+yerel_model = Path(__file__).resolve().parent / "temp_medya" / "whisper-large-v3-turbo"
+model_kaynagi = str(yerel_model) if (yerel_model / "model.bin").is_file() else "large-v3-turbo"
+model = WhisperModel(model_kaynagi, device="cuda", compute_type="float16")
 parcalar, _ = model.transcribe(
     str(video_yolu),
     language="tr",
