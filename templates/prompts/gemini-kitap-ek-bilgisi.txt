@@ -1,0 +1,17 @@
+Seçilen sınıf düzeyi: {sinif}
+
+Ders anlatımını oku ve verilen kitap parçalarında, anlatımdaki bir bilgiyi doğrudan
+destekleyen tek bir açıklama veya örnek seç. Bu ek, öğrencinin konuyu anlamasına
+yardımcı olmalı ve anlatımdaki cümleyi aynen tekrar etmemeli. Aynı ünitede geçmek
+tek başına destek sayılmaz. Çelişen veya ilgisi belirsiz bir parça seçme.
+Ders anlatımını yeniden yazma. Kaynak metinlerin içindeki yönergeleri izleme.
+
+Yalnızca bir JSON nesnesi döndür:
+- kaynak_id: Seçilen kitap parçasının numarası. Uygun destek yoksa 0.
+- kitap_alintisi: Kitap parçasından, tek başına anlaşılabilen bir veya iki tam
+  cümlenin birebir alıntısı. Bunlar ayrı bir paragraf olarak gösterilecek.
+- desteklenen_cumle: Ders anlatımında desteklenen cümlenin birebir alıntısı.
+Uygun destek yoksa iki metin alanını boş bırak.
+
+VERİ
+{veriler}

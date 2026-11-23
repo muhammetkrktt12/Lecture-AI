@@ -9,7 +9,7 @@ Kontrol Edilen Bileşenler:
 2. Sistem İkili Dosyaları (FFmpeg ve FFprobe)
 3. Yerel Ollama Servisi ve Modelleri (embeddinggemma, qwen3.5 vb.)
 4. Yerel Konuşma Tanıma (Faster-Whisper Small Modeli)
-5. Aktif Vektör Veritabanı (data/chroma_db_v2, eduframe_meb_768 koleksiyonu, 768-D boyut)
+5. Aktif Vektör Veritabanı (data/chroma_db, eduframe_meb_768 koleksiyonu, 768-D boyut)
 6. MEB Kaynak Ders Kitapları (data/reference_books altındaki PDF'ler)
 7. Gemma BPE Tokenizer (gemma_tokenizer.json ve tokenizer_utils)
 8. Medya ve Çıktı Dizinleri (temp_medya, frames, outputs, videos)
@@ -35,7 +35,6 @@ try:
         ROOT,
         DATA_DIR,
         CHROMA_DB_DIR,
-        CHROMA_DB_V2_DIR,
         REFERENCE_BOOKS_DIR,
         TEMP_DIR,
         VIDEOS_DIR,
@@ -49,8 +48,7 @@ try:
 except ImportError:
     ROOT = ROOT_DIR
     DATA_DIR = ROOT / "data"
-    CHROMA_DB_DIR = DATA_DIR / "chroma_db_v2"
-    CHROMA_DB_V2_DIR = CHROMA_DB_DIR
+    CHROMA_DB_DIR = DATA_DIR / "chroma_db"
     REFERENCE_BOOKS_DIR = DATA_DIR / "reference_books"
     TEMP_DIR = ROOT / "temp_medya"
     VIDEOS_DIR = TEMP_DIR / "videos"
@@ -222,10 +220,10 @@ def main():
     toplam_kontrol += 1
     chroma_mevcut = CHROMA_DB_DIR.exists()
     if chroma_mevcut:
-        durum_yaz("ChromaDB v2 Dizini", True, str(CHROMA_DB_DIR))
+        durum_yaz("ChromaDB v1 Dizini", True, str(CHROMA_DB_DIR))
         basari_sayisi += 1
     else:
-        durum_yaz("ChromaDB v2 Dizini", False, f"{CHROMA_DB_DIR} bulunamadı!")
+        durum_yaz("ChromaDB v1 Dizini", False, f"{CHROMA_DB_DIR} bulunamadı!")
 
     toplam_kontrol += 1
     try:

@@ -662,7 +662,11 @@ class PDFGenerator:
 
             duzenli_anlatim = bolum.get("pedagojik_anlatim") or bolum.get("duzenlenmis_anlatim", "")
             if duzenli_anlatim:
-                d_para = Paragraph(escape(duzenli_anlatim).replace("\n", "<br/>"), self.style_pedagogical)
+                anlatim_html = escape(duzenli_anlatim).replace("\n", "<br/>")
+                if bolum.get("kitap_ek_bilgisi"):
+                    ek = escape(bolum["kitap_ek_bilgisi"])
+                    anlatim_html += f"<br/><br/><b>Kitaptan ek bilgi:</b> {ek}"
+                d_para = Paragraph(anlatim_html, self.style_pedagogical)
                 baslik = "Düzenlenmiş Ders Anlatımı"
                 if bolum.get("kaynak_tipi") == "transkript":
                     baslik = "Ders Anlatımı (Transkript)"

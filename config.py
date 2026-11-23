@@ -14,20 +14,9 @@ load_dotenv()
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 
-# ChromaDB Sürüm Dizinleri ve Aktif Yol Yapılandırması:
-# EDUFRAME_CHROMA_DB_DIR ortam değişkeni tanımlıysa o yol kullanılır (örn: data/chroma_db_v2).
-# Tanımlı değilse varsayılan yol güvenli v1 veritabanı (data/chroma_db) olarak kalır (Rollback uyumlu).
+# Uygulamanın aktif ChromaDB dizini (v1).
 CHROMA_DB_V1_DIR = DATA_DIR / "chroma_db"
-CHROMA_DB_V2_DIR = DATA_DIR / "chroma_db_v2"
-
-_custom_db_dir = os.getenv("EDUFRAME_CHROMA_DB_DIR")
-if _custom_db_dir:
-    _custom_path = Path(_custom_db_dir)
-    CHROMA_DB_DIR = _custom_path if _custom_path.is_absolute() else (ROOT / _custom_path)
-elif CHROMA_DB_V2_DIR.exists():
-    CHROMA_DB_DIR = CHROMA_DB_V2_DIR
-else:
-    CHROMA_DB_DIR = CHROMA_DB_V1_DIR
+CHROMA_DB_DIR = CHROMA_DB_V1_DIR
 
 REFERENCE_BOOKS_DIR = DATA_DIR / "reference_books"
 
@@ -40,6 +29,7 @@ OUTPUTS_DIR = TEMP_DIR / "outputs"
 # Geriye dönük uyumluluk için eski değişken isimleri
 DB_DIR = CHROMA_DB_DIR
 COLLECTION = "eduframe_meb_768"
+RAG_MAX_MESAFE = 1.1
 
 # --- EĞİTİM SEVİYELERİ ---
 EGITIM_SEVIYELERI = ["İlkokul", "Ortaokul", "Lise", "Üniversite"]

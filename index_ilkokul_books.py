@@ -35,8 +35,6 @@ if str(ROOT_DIR) not in sys.path:
 
 from config import (
     CHROMA_DB_DIR,
-    CHROMA_DB_V1_DIR,
-    CHROMA_DB_V2_DIR,
     REFERENCE_BOOKS_DIR,
     OLLAMA_URL,
     EMBED_MODEL,

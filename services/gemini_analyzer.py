@@ -405,6 +405,7 @@ class GeminiAnalyzer:
         onbellek_dizini: Optional[Path] = None,
         *,
         egitim_seviyesi: str = "İlkokul",
+        bolum_turu_belirle: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Gemini ile kaynakları sınırlandırılmış, konuşmaya dayalı fasikül bölümü üretir."""
         ham = bolum.get("transkript") or ""
@@ -434,6 +435,16 @@ class GeminiAnalyzer:
             "contents": [{"parts": [{"text": istem}]}],
             "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
         }
+        if bolum_turu_belirle:
+            payload["systemInstruction"] = {"parts": [{"text": (
+                "İstenen JSON'a bolum_turu ve bolum_turu_alintisi alanlarını ekle. "
+                "Bölüm türünü yalnızca öğretmenin transkriptinden belirle. Öğretmen bir soruyu "
+                "işlem yaparak, karşılaştırarak, eleyerek veya cevabını gerekçelendirerek çözüyorsa "
+                "bolum_turu soru_cozumu olsun. Şık harfi şart değildir. Öğretmen yalnızca bir "
+                "konuyu açıklıyorsa konu_anlatimi yaz. Yalnız konu duyurusu, karışık bölüm veya "
+                "emin olmadığın durumda belirsiz yaz. bolum_turu_alintisi alanında bu karara "
+                "dayanak olan ifadeyi transkriptten aynen al ve zaman damgalarını kopyalama."
+            )}]}
         veri = None
         onbellek_yolu = None
         if onbellek_dizini is not None:
@@ -474,6 +485,18 @@ class GeminiAnalyzer:
         ] if isinstance(kavramlar, list) else []
         bolum["duzenlenmis_anlatim"] = bolum["pedagojik_anlatim"] = anlatim.strip()
         bolum["kaynak_tipi"] = "gemini"
+        if bolum_turu_belirle:
+            tur = veri.get("bolum_turu")
+            dayanak = veri.get("bolum_turu_alintisi")
+            bolum["bolum_turu"] = "belirsiz"
+            if secenekler:
+                bolum["bolum_turu"] = "soru_cozumu"
+            elif (
+                tur in ("soru_cozumu", "konu_anlatimi")
+                and isinstance(dayanak, str) and len(dayanak.split()) >= 3
+                and " ".join(dayanak.casefold().split()) in " ".join(ham.casefold().split())
+            ):
+                bolum["bolum_turu"] = tur
         bolum["kitap_referansi"] = ""
         bolum["rag_kaynaklari"] = []
         kaynak_id, alinti = veri.get("kaynak_id"), veri.get("kitap_alintisi")
@@ -505,6 +528,33 @@ class GeminiAnalyzer:
                 if gecici_yol is not None:
                     gecici_yol.unlink(missing_ok=True)
         return bolum
+
+    def gemini_kitap_ek_bilgisi_sec(
+        self, anlatim: str, adaylar: List[Dict[str, Any]], sinif: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Ders anlatımını değiştirmeden kitapta yer alan bir açıklama seçer."""
+        if not adaylar:
+            return None
+        parcalar = {i: aday["icerik"][:1500] for i, aday in enumerate(adaylar, 1)}
+        veriler = json.dumps({"anlatim": anlatim, "kitap_parcalari": parcalar}, ensure_ascii=False)
+        istem = _fasikul_istemi("gemini-kitap-ek-bilgisi", sinif=sinif, veriler=veriler)
+        yanit = self._gemini_rest_sentez(istem, timeout=max(60, self.gemini_timeout))
+        if not isinstance(yanit, dict):
+            return None
+        kaynak_id = yanit.get("kaynak_id")
+        if type(kaynak_id) is not int or kaynak_id not in parcalar:
+            return None
+        kitap_alintisi = yanit.get("kitap_alintisi")
+        desteklenen = yanit.get("desteklenen_cumle")
+        for alinti, metin in ((kitap_alintisi, parcalar[kaynak_id]), (desteklenen, anlatim)):
+            if not isinstance(alinti, str) or len(alinti.split()) < 4:
+                return None
+            if " ".join(alinti.split()) not in " ".join(metin.split()):
+                return None
+        metin = " ".join(kitap_alintisi.split())
+        if not metin.endswith((".", "!", "?")) or metin in " ".join(anlatim.split()):
+            return None
+        return {"metin": metin, "kaynak": adaylar[kaynak_id - 1]}
 
     def bolum_pedagojik_sentezle(
         self,

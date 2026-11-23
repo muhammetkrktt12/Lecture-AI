@@ -16,7 +16,6 @@ Temel Kurallar ve Sorumluluklar:
    açıklamalarla donatılmıştır.
 """
 
-import os
 import re
 import hashlib
 from pathlib import Path
@@ -54,22 +53,19 @@ try:
         DEFAULT_SEVIYE,
         OLLAMA_URL,
         EMBED_MODEL,
+        RAG_MAX_MESAFE,
     )
 except ImportError:
     ROOT = Path(__file__).resolve().parent.parent
     DATA_DIR = ROOT / "data"
-    _custom_db = os.getenv("EDUFRAME_CHROMA_DB_DIR")
-    if _custom_db:
-        _cp = Path(_custom_db)
-        CHROMA_DB_DIR = _cp if _cp.is_absolute() else (ROOT / _cp)
-    else:
-        CHROMA_DB_DIR = DATA_DIR / "chroma_db"
+    CHROMA_DB_DIR = DATA_DIR / "chroma_db"
     REFERENCE_BOOKS_DIR = DATA_DIR / "reference_books"
-    COLLECTION = "eduframe_rag_v1"
+    COLLECTION = "eduframe_meb_768"
     EGITIM_SEVIYELERI = ["İlkokul", "Ortaokul", "Lise", "Üniversite"]
     DEFAULT_SEVIYE = "İlkokul"
     OLLAMA_URL = "http://localhost:11434"
     EMBED_MODEL = "embeddinggemma"
+    RAG_MAX_MESAFE = 1.1
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +210,19 @@ class RAGMotoru:
             db_dizini=self.db_dizini,
         )
         self._vector_store: Optional[Chroma] = None
+
+    def metin_benzerlikleri(self, kaynak: str, anlatimlar: List[str]) -> List[float]:
+        """Bir kitap alıntısını birden fazla bölüm anlatımıyla karşılaştırır."""
+        vektorler = np.asarray(self.embedding.embed_documents([kaynak, *anlatimlar]), dtype=float)
+        kaynak_vektoru, aday_vektorleri = vektorler[0], vektorler[1:]
+        payda = np.linalg.norm(kaynak_vektoru) * np.linalg.norm(aday_vektorleri, axis=1)
+        skorlar = np.divide(
+            aday_vektorleri @ kaynak_vektoru,
+            payda,
+            out=np.zeros(len(anlatimlar)),
+            where=payda > 0,
+        )
+        return skorlar.tolist()
 
     def get_vector_store(self) -> Chroma:
         """Kalıcı ChromaDB vektör deposu bağlantısını döndürür."""
@@ -361,7 +370,7 @@ class RAGMotoru:
         k: int = 4,
         rerank: bool = True,
         allow_cross_grade: bool = False,
-        max_mesafe: float = 1.04,
+        max_mesafe: float = RAG_MAX_MESAFE,
     ) -> List[Document]:
         """
         Kullanıcının seçtiği eğitim seviyesine ve sınıf düzeyine ait belgeler arasında
@@ -370,8 +379,7 @@ class RAGMotoru:
         KATI SINIF İZOLASYONU VE ALAKA EŞİĞİ KURALI:
         1. sinif belirtilmişse (Örn. '3. Sınıf'), arama en baştan itibaren SADECE o sınıfla sınırlandırılır.
         2. allow_cross_grade=False (varsayılan) iken, 3. sınıf aramasında asla 4. sınıf veya başka kademe belgeleri dönmez.
-        3. Alaka Eşiği (Relevance Threshold): max_mesafe (varsayılan 0.95) üzerindeki tamamen alakasız/konu dışı
-           sorgularda (Örn. 'bugün istanbulda ayasofyayı gezeceğim') sonuç dönmez; boş liste verilir.
+        3. Alaka eşiği: Vektör mesafesi max_mesafe değerini aşan adaylar elenir.
         4. Vektör aramasından gerçek skor/mesafe alınır (vektor_skoru, vektor_mesafesi).
         5. Aday dokümanlar 3-gram Türkçe Jaccard lexical reranking ile sıralanır.
         """
@@ -394,7 +402,6 @@ class RAGMotoru:
             results_with_scores = store.similarity_search_with_score(query=sorgu, k=aday_sayisi, filter=where_filter)
             for doc, dist in results_with_scores:
                 dist_val = float(dist)
-                # Alaka Eşiği: Mesafe max_mesafe (0.95) üzerindeyse veya tamamen ortogonal/zıtsa elenir
                 if max_mesafe is not None and dist_val > max_mesafe:
                     continue
                 doc.metadata["arama_yontemi"] = "vektor_benzerligi"

@@ -13,7 +13,6 @@ Mimari Akış ve Karar Düğümleri:
      boru hattı sırasıyla işletilir.
 """
 
-import os
 import sys
 from pathlib import Path
 from tempfile import mkdtemp
@@ -33,7 +32,8 @@ from services.video_processor import VideoProcessor
 from services.gemini_analyzer import GeminiAnalyzer, GeminiFasikulHatasi
 from services.question_generator import QuestionGenerator
 from services.pdf_generator import EksikDersKaresiHatasi, PDFGenerator
-from config import CHROMA_DB_DIR, CHROMA_DB_V1_DIR, DEFAULT_SEVIYE, FRAMES_DIR, TEMP_DIR
+from config import DEFAULT_SEVIYE, FRAMES_DIR, TEMP_DIR
+from utils.lexical_tools import kelimelere_ayir, lexical_similarity
 
 # Kalite ve Doğrulama Araçları (utils.lexical_tools öncelikli)
 try:
@@ -151,33 +151,49 @@ def video_indir_dugumu(state: EduFrameState) -> Dict[str, Any]:
     return {"video_bilgisi": sonuc}
 
 
-def _fasikul_rag_motoru(state: EduFrameState) -> RAGMotoru:
-    rag = RAGMotoru()
-    if (
-        state.get("anlatim_modeli") == "gemini"
-        and not os.getenv("EDUFRAME_CHROMA_DB_DIR")
-        and CHROMA_DB_DIR != CHROMA_DB_V1_DIR
-        and CHROMA_DB_V1_DIR.is_dir()
-        and not rag.mevcut_veritabani_durumu().get("toplam_parca")
-    ):
-        eski_indeks = RAGMotoru(db_dizini=CHROMA_DB_V1_DIR)
-        if eski_indeks.mevcut_veritabani_durumu().get("toplam_parca"):
-            print(f"[RAG] Varsayılan koleksiyon boş. Dolu koleksiyon kullanılıyor: {CHROMA_DB_V1_DIR}")
-            return eski_indeks
-    return rag
-
-
 def rag_baglam_dugumu(state: EduFrameState) -> Dict[str, Any]:
     """Yalnızca istenen değerlendirme soruları için kitap örneklerini getirir."""
     if not state.get("soru_eklensin_mi"):
         return {}
     return {
-        "rag_soru_ornekleri": _fasikul_rag_motoru(state).soru_formatlarini_getir(
+        "rag_soru_ornekleri": RAGMotoru().soru_formatlarini_getir(
             egitim_seviyesi=state.get("egitim_seviyesi", DEFAULT_SEVIYE),
             sinif=state.get("sinif_duzeyi") or "3. Sınıf",
             k=3,
         )
     }
+
+
+def _gemini_kitap_eklerini_yerlestir(
+    kitap_ekleri: List[tuple[Dict[str, Any], Dict[str, Any]]],
+    rag: RAGMotoru,
+) -> List[Dict[str, Any]]:
+    """Tekrarlanan kitap ekini en yakın bölümde gösterir."""
+    gruplar: Dict[str, List[tuple[Dict[str, Any], Dict[str, Any]]]] = {}
+    for bolum, destek in kitap_ekleri:
+        anahtar = " ".join(kelimelere_ayir(destek["metin"]))
+        gruplar.setdefault(anahtar, []).append((bolum, destek))
+
+    kaynaklar = []
+    for adaylar in gruplar.values():
+        kazanan = 0
+        if len(adaylar) > 1:
+            alinti = adaylar[0][1]["metin"]
+            anlatimlar = [bolum["duzenlenmis_anlatim"] for bolum, _ in adaylar]
+            try:
+                skorlar = rag.metin_benzerlikleri(alinti, anlatimlar)
+            except RuntimeError as hata:
+                print(f"[RAG] Ek bilgi benzerliği hesaplanamadı, sözcüksel karşılaştırma kullanılıyor: {hata}")
+                skorlar = [lexical_similarity(alinti, anlatim) for anlatim in anlatimlar]
+            kazanan = max(range(len(adaylar)), key=skorlar.__getitem__)
+
+        bolum, destek = adaylar[kazanan]
+        kaynak = {k: v for k, v in destek["kaynak"].items() if k != "icerik"}
+        bolum["kitap_ek_bilgisi"] = destek["metin"]
+        bolum["kitap_referansi"] = f"{kaynak['kitap_adi']}, basılı sayfa {kaynak['printed_page']}"
+        bolum["rag_kaynaklari"] = [kaynak]
+        kaynaklar.append(kaynak)
+    return kaynaklar
 
 
 def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
@@ -192,12 +208,14 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
     gemini_secili = state.get("anlatim_modeli") == "gemini"
     if gemini_secili and not analyzer._api_anahtari_var_mi():
         raise GeminiFasikulHatasi("Gemini ile PDF üretmek için GEMINI_API_KEY ayarlanmalıdır.")
-    rag = _fasikul_rag_motoru(state)
-    print(f"\n[3D RAG] {len(bolumler)} bölüm için konu uygunluk denetimi başlatılıyor...")
-
+    rag = RAGMotoru()
     tum_dogrulanmis_kaynaklar = []
-    gemini_adaylari = []
-    for bolum in bolumler:
+    kitap_ekleri = []
+    if gemini_secili:
+        print(f"\n[Gemini] {len(bolumler)} bölüm için transkript ve ayrı kitap desteği işleniyor...")
+    else:
+        print(f"\n[3D RAG] {len(bolumler)} bölüm için konu uygunluk denetimi başlatılıyor...")
+    for bolum in ([] if gemini_secili else bolumler):
         b_no = bolum.get("bolum_no", 1)
         b_baslik = bolum.get("bolum_basligi", "")
         b_transkript = analyzer.transkript_filtrele(bolum.get("transkript", ""))
@@ -227,18 +245,6 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
         }
 
         kaynaklar = rag_sonuc.get("tum_kaynaklar", [])
-        if gemini_secili:
-            adaylar = []
-            for parca in rag_sonuc["bilgi"].get("kaynaklar", []):
-                kaynak = next((
-                    k for k in kaynaklar if k.get("referans") == parca.get("referans")
-                    and k.get("kitap_adi") and k.get("has_printed_page")
-                    and k.get("printed_page") is not None
-                ), None)
-                if kaynak and parca.get("icerik"):
-                    adaylar.append({**kaynak, "icerik": parca["icerik"]})
-            gemini_adaylari.append(adaylar)
-            continue
         bolum["rag_kaynaklari"] = kaynaklar
         sentez_baglami = bolum["rag_3d"]["bilgi"][:1000] + "\n" + bolum["rag_3d"]["pedagoji"][:700]
         kaynak = next(
@@ -261,22 +267,41 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
         print(f" -> [Bölüm {b_no}] 3D RAG tamamlandı: {b_baslik[:30]}... (Destek: {bolum.get('kaynak_destek_durumu')})")
 
     # -----------------------------------------------------------------------
-    # AŞAMA 2: PEDAGOJİK HARMANLAMA VE DERİN KONU ANLATIMI SENTEZİ
+    # AŞAMA 2: BÖLÜM ANLATIMI VE KAYNAKLAR
     # -----------------------------------------------------------------------
-    print(f"\n[Pedagojik Sentez] {len(bolumler)} bölüm için öğretmen anlatımı ve MEB ders kitabı harmanlanıyor...")
+    print(f"\n[Pedagojik Sentez] {len(bolumler)} bölüm için ders anlatımı hazırlanıyor...")
     gorulen_kavramlar = set()
-    for idx, bolum in enumerate(bolumler):
+    for bolum in bolumler:
         if gemini_secili:
+            ham_transkript = analyzer.transkript_filtrele(bolum.get("transkript", ""))
+            bolum["temel_konu"] = ham_transkript[:180] or bolum.get("bolum_basligi", "")
             if not analyzer.gemini_fasikul_bolumu_uret(
-                bolum, sinif, gemini_adaylari[idx], sorted(gorulen_kavramlar),
+                bolum, sinif, [], sorted(gorulen_kavramlar),
                 onbellek_dizini=TEMP_DIR / "gemini_bolum_onbellek",
                 egitim_seviyesi=seviye,
+                bolum_turu_belirle=True,
             ):
                 raise GeminiFasikulHatasi(
                     f"Gemini bölümü tamamlayamadı: {bolum['bolum_basligi']} "
                     f"({bolum['zaman_araligi_metni']}). API erişimini, kotayı ve model yanıtını kontrol edin."
                 )
-            tum_dogrulanmis_kaynaklar.extend(bolum["rag_kaynaklari"])
+            bolum.pop("kitap_ek_bilgisi", None)
+            anlatim = bolum["duzenlenmis_anlatim"]
+            if bolum.get("bolum_turu") == "konu_anlatimi":
+                belgeler = rag.seviye_filtreli_arama(
+                    sorgu=anlatim, egitim_seviyesi=seviye, sinif=sinif, ders_adi=ders, k=3,
+                )
+                bolum["rag_sorgulari"] = [anlatim]
+                adaylar = [
+                    {**belge.metadata, "icerik": belge.page_content}
+                    for belge in belgeler
+                    if belge.page_content.strip() and belge.metadata.get("kitap_adi")
+                    and belge.metadata.get("has_printed_page")
+                    and belge.metadata.get("printed_page") is not None
+                ]
+                destek = analyzer.gemini_kitap_ek_bilgisi_sec(anlatim, adaylar, sinif)
+                if destek:
+                    kitap_ekleri.append((bolum, destek))
         else:
             analyzer.bolum_pedagojik_sentezle(
                 bolum=bolum,
@@ -308,6 +333,8 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
         elif "kare_zamani" not in bolum:
             bolum["kare_zamani"] = float(30 * b_no)
 
+    if gemini_secili:
+        tum_dogrulanmis_kaynaklar.extend(_gemini_kitap_eklerini_yerlestir(kitap_ekleri, rag))
     analiz_sonucu["tum_kaynaklar"] = tum_dogrulanmis_kaynaklar
     model_kaynaklari = {b.get("kaynak_tipi") for b in bolumler}
     if len(model_kaynaklari) == 1:

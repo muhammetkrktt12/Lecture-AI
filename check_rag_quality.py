@@ -16,9 +16,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from services.rag_motoru import RAGMotoru
-from config import CHROMA_DB_DIR, COLLECTION
-
-SERBEST_ARAMA_MAX_MESAFE = 1.04
+from config import CHROMA_DB_V1_DIR, RAG_MAX_MESAFE
 
 
 def baslik(metin: str):
@@ -169,7 +167,7 @@ def sinif_izolasyon_testleri(rag: RAGMotoru):
 
 
 def serbest_sorgu_calistir(
-    rag: RAGMotoru, sorgu: str, sinif: str, max_mesafe: float = SERBEST_ARAMA_MAX_MESAFE
+    rag: RAGMotoru, sorgu: str, sinif: str, max_mesafe: float = RAG_MAX_MESAFE
 ):
     baslik(f"Serbest Arama Testi: '{sorgu}' (Hedef: {sinif}, max_mesafe={max_mesafe})")
     sonuclar = rag.seviye_filtreli_arama(
@@ -205,12 +203,12 @@ def main():
     parser.add_argument(
         "--max-mesafe",
         type=float,
-        default=SERBEST_ARAMA_MAX_MESAFE,
+        default=RAG_MAX_MESAFE,
         help="Serbest aramada kabul edilen en büyük vektör mesafesi",
     )
     args = parser.parse_args()
 
-    rag = RAGMotoru()
+    rag = RAGMotoru(db_dizini=CHROMA_DB_V1_DIR)
 
     if args.sorgu:
         serbest_sorgu_calistir(rag, args.sorgu, args.sinif, args.max_mesafe)

@@ -264,6 +264,8 @@ with tab_video:
                     st.markdown(f"**2. Düzenlenmiş Konu Anlatımı ({secilen_sinif} Ders Kitabı Referanslı):**")
                     anlatim = escape(bolum.get("duzenlenmis_anlatim") or "")
                     st.markdown(f'<div class="box-pedagogical">{anlatim}</div>', unsafe_allow_html=True)
+                    if bolum.get("kitap_ek_bilgisi"):
+                        st.caption(f"Kitaptan ek bilgi: {bolum['kitap_ek_bilgisi']}")
 
                     st.markdown("**3. Bölümün Önemli Kavramları ve Açıklamaları:**")
                     kavramlar = bolum.get("onemli_kavramlar", [])
