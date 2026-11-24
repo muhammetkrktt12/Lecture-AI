@@ -4,7 +4,7 @@
 
 # LectraAI
 
-**Ders videolarından hızlıca görsel destekli ders notu çıkar.**
+**Bu AI uygulaması, ders videolarından hızlıca görsel destekli ders notu çıkarmaya yarar.**
 
 LectraAI, Türkçe ders videolarındaki konuşmayı ve ekrandaki öğretim materyallerini eşleştirerek PDF ders fasikülü hazırlar. Bir YouTube bağlantısındaki veya bilgisayarındaki videodan zaman damgalı bölümler, ekran görüntüleri, düzenlenmiş ders anlatımı ve isteğe bağlı bir değerlendirme bölümü oluşturabilirsin. MEB ders kitapları indekslendiğinde uygulama, ilgili açıklamaları ve doğrulanabilen sayfa atıflarını fasiküle ekler.
 
@@ -218,7 +218,3 @@ Yeniden basımı daha sonra kullanacaksan PDF ile birlikte içerik kaydını ve 
 | MEB araması boş | Kitap PDF’lerinin adlarını, etkin Chroma dizinini, `embeddinggemma` modelini ve seçilen sınıfı kontrol et. |
 | Bir bölüm için temiz kare bulunamadı | `test_video_segmentation.py` ile görsel ve konuşma aralıklarına bak. PDF akışı görseli olmayan bir bölümü sessizce atlamaz. |
 | Yeniden basımda görsel bulunamadı | `.icerik.json` içindeki kare yollarına erişilebildiğini kontrol et. |
-
-## GitHub’a yüklerken
-
-`.env` dosyasını, API anahtarlarını, sanal ortamı, yerel MEB kitaplarını, Chroma indeksini ve üretilen videoları veya PDF’leri paylaşma. Depodaki `.gitignore` bu yerel girdileri ve çıktıları kapsam dışında tutar. Arayüz logosu, PDF çerçeveleri, model istemleri, kaynak kodu ve kurulum belgeleri depoyla birlikte taşınabilir. Göndermeden önce `git status --short` ile dosyaları kontrol et.
