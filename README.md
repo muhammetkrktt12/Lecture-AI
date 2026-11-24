@@ -6,7 +6,7 @@
 
 **Bu AI uygulaması, ders videolarından hızlıca görsel destekli ders notu çıkarmaya yarar.**
 
-LectraAI, Türkçe ders videolarındaki konuşmayı ve ekrandaki öğretim materyallerini eşleştirerek ve ayrıca videoda geçen reklam, tanıtım ve dersle ilgili olmayan gereksiz konuşmaları çıkararak PDF ders fasikülü hazırlar. Bir YouTube bağlantısındaki veya bilgisayarındaki videodan zaman damgalı bölümler, ekran görüntüleri, düzenlenmiş ders anlatımı ve isteğe bağlı bir değerlendirme bölümü oluşturabilirsin. MEB ders kitapları indekslendiğinde uygulama, ilgili açıklamaları ve doğrulanabilen sayfa atıflarını fasiküle ekler.
+LectraAI, Türkçe ders videolarındaki ders anlatımı konuşmasını  ekrandaki öğretim materyalleriyle eşleştirerek ve ayrıca videoda geçen reklam, tanıtım ve dersle ilgili olmayan gereksiz konuşmaları çıkararak PDF ders fasikülü hazırlamaya yarar. Bir YouTube bağlantısındaki veya bilgisayarındaki videodan zaman damgalı bölümler, ekran görüntüleri, düzenlenmiş ders anlatımı ve isteğe bağlı bir değerlendirme bölümü oluşturabilirsin. MEB ders kitapları indekslendiğinde uygulama, ilgili açıklamaları ve doğrulanabilen sayfa atıflarını fasiküle ekler.
 
 ## Özellikler
 
