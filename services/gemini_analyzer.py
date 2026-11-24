@@ -23,10 +23,13 @@ import os
 import re
 import json
 import time
+from difflib import SequenceMatcher
 from hashlib import sha256
 from tempfile import NamedTemporaryFile
 import requests
-from difflib import SequenceMatcher
+from services.gemini_rate_limit import gemini_istegini_beklet, gemini_kota_hatasini_isle
+from services.gemini_usage import gemini_kullanimini_kaydet
+from utils.lexical_tools import kelimelere_ayir
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -65,10 +68,79 @@ class GeminiFasikulHatasi(RuntimeError):
 
 
 _FASIKUL_ISTEM_DIZINI = Path(__file__).resolve().parent.parent / "templates" / "prompts"
+_SECENEK_DESENI = re.compile(r"\b([A-E])\s+(?:ş[ıi]k\w*|seçene\w*)", re.IGNORECASE)
+_BOLUM_TURU_KURALI = (
+    "Bölüm türünü yalnızca öğretmenin transkriptinden belirle. Öğretmen bir soruyu "
+    "işlem yaparak, karşılaştırarak, eleyerek veya cevabını gerekçelendirerek çözüyorsa "
+    "bolum_turu soru_cozumu olsun. Şık harfi şart değildir. Öğretmen yalnızca bir "
+    "konuyu açıklıyorsa konu_anlatimi yaz. Yalnız konu duyurusu, karışık bölüm veya "
+    "emin olmadığın durumda belirsiz yaz."
+)
+_BOLUM_TURU_ISTEMI = (
+    "İstenen JSON'a bolum_turu ve bolum_turu_alintisi alanlarını ekle. "
+    + _BOLUM_TURU_KURALI
+    + " bolum_turu_alintisi alanında bu karara "
+    "dayanak olan ifadeyi transkriptten aynen al ve zaman damgalarını kopyalama."
+)
+_OLLAMA_BOLUM_YANIT_SEMASI = {
+    "type": "object",
+    "properties": {
+        "bolum_turu": {"type": "string", "enum": ["konu_anlatimi", "soru_cozumu", "belirsiz"]},
+        "bolum_basligi": {"type": "string"},
+        "orijinal_transkript": {"type": "string"},
+        "duzenlenmis_anlatim": {"type": "string"},
+        "ornekler": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"ornek": {"type": "string"}, "aciklama": {"type": "string"}, "koken": {"type": "string"}},
+                "required": ["ornek", "aciklama", "koken"],
+            },
+        },
+        "onemli_kavramlar": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"kavram": {"type": "string"}, "aciklama": {"type": "string"}},
+                "required": ["kavram", "aciklama"],
+            },
+        },
+    },
+    "required": [
+        "bolum_turu", "bolum_basligi", "orijinal_transkript",
+        "duzenlenmis_anlatim", "ornekler", "onemli_kavramlar",
+    ],
+}
+_OLLAMA_KITAP_EKI_YANIT_SEMASI = {
+    "type": "object",
+    "properties": {
+        "kaynak_id": {"type": "integer"},
+        "kitap_alintisi": {"type": "string"},
+        "desteklenen_cumle": {"type": "string"},
+    },
+    "required": ["kaynak_id", "kitap_alintisi", "desteklenen_cumle"],
+}
 
 
 def _fasikul_istemi(ad: str, **veriler: Any) -> str:
     return (_FASIKUL_ISTEM_DIZINI / f"{ad}.txt").read_text(encoding="utf-8-sig").format(**veriler)
+
+
+def _fasikul_bolum_turu(ham: str, veri: Dict[str, Any], *, dayanak_zorunlu: bool = True) -> str:
+    if _SECENEK_DESENI.search(ham):
+        return "soru_cozumu"
+    tur = veri.get("bolum_turu")
+    if tur not in ("soru_cozumu", "konu_anlatimi"):
+        return "belirsiz"
+    if not dayanak_zorunlu:
+        return tur
+    dayanak = veri.get("bolum_turu_alintisi")
+    if (
+        isinstance(dayanak, str) and len(dayanak.split()) >= 3
+        and " ".join(dayanak.casefold().split()) in " ".join(ham.casefold().split())
+    ):
+        return tur
+    return "belirsiz"
 
 
 class GeminiAnalyzer:
@@ -114,6 +186,13 @@ class GeminiAnalyzer:
 
     def _api_anahtari_var_mi(self) -> bool:
         return bool(self.api_key and len(self.api_key.strip()) > 10 and not self.api_key.startswith("AIzaSyDummy"))
+
+    def _ollama_istem_adi(self, varsayilan: str, sonek: str = "") -> str:
+        etiket = self.ollama_model.replace(":", "-")
+        ad = f"{etiket}{sonek}"
+        if re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", etiket) and (_FASIKUL_ISTEM_DIZINI / f"{ad}.txt").is_file():
+            return ad
+        return varsayilan
 
     @staticmethod
     def _json_ayristir(metin: str) -> Optional[Dict[str, Any]]:
@@ -163,6 +242,29 @@ class GeminiAnalyzer:
             metin = re.sub(p, "", metin, flags=re.IGNORECASE).strip()
 
         return metin.strip()
+
+    def _ollama_transkript_icerigi_korunuyor_mu(self, ham: str, duzeltilmis: str) -> bool:
+        """Konu sözcükleri ve örnekler kaybolmadan yapılan yerel düzeltmeleri kabul eder."""
+        dolgu = {"yani", "eee", "ııı", "hmm", "şey", "arkadaşlar", "sevgili"}
+        kaynak = [s for s in kelimelere_ayir(self.transkript_filtrele(ham)) if s not in dolgu]
+        sonuc = [s for s in kelimelere_ayir(self.transkript_filtrele(duzeltilmis)) if s not in dolgu]
+        if not kaynak or not sonuc:
+            return kaynak == sonuc
+
+        eslesme = SequenceMatcher(None, kaynak, sonuc, autojunk=False)
+        for tur, ilk, son, yeni_ilk, yeni_son in eslesme.get_opcodes():
+            if tur == "equal":
+                continue
+            eski = kaynak[ilk:son]
+            yeni = sonuc[yeni_ilk:yeni_son]
+            if tur != "replace" or not 1 <= len(eski) <= 3 or not 1 <= len(yeni) <= 3:
+                return False
+            if any(s.isdecimal() for s in eski + yeni):
+                return False
+            # Bitişik/ayrı ASR hatalarını ve birkaç harflik düzeltmeleri tolere et.
+            if SequenceMatcher(None, "".join(eski), "".join(yeni), autojunk=False).ratio() < 0.65:
+                return False
+        return True
 
     @classmethod
     def pedagojik_anlatim_normallestir(cls, metin: str) -> str:
@@ -277,6 +379,8 @@ class GeminiAnalyzer:
         payload: Dict[str, Any],
         timeout: Optional[int] = None,
         max_retries: Optional[int] = None,
+        *,
+        asama: str,
     ) -> Optional[Dict[str, Any]]:
         """
         Google Gemini API'ye istek gönderir.
@@ -292,12 +396,26 @@ class GeminiAnalyzer:
 
         headers = {"x-goog-api-key": self.api_key, "Content-Type": "application/json"}
         for current_model in models_to_try:
+            istek = payload
+            if asama == "kitap_ek_bilgisi" and current_model == "gemini-3-flash-preview":
+                istek = {
+                    **payload,
+                    "generationConfig": {
+                        **payload["generationConfig"],
+                        "thinkingConfig": {"thinkingLevel": "LOW"},
+                    },
+                }
             for attempt in range(retries + 1):
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent"
                 try:
-                    res = requests.post(url, json=payload, headers=headers, timeout=timeout_sec)
+                    gemini_istegini_beklet(current_model)
+                    res = requests.post(url, json=istek, headers=headers, timeout=timeout_sec)
+                    if res.status_code not in (200, 429):
+                        gemini_kullanimini_kaydet(current_model, asama, durum=str(res.status_code))
                     if res.status_code == 200:
-                        cands = res.json().get("candidates", [])
+                        yanit = res.json()
+                        gemini_kullanimini_kaydet(current_model, asama, yanit)
+                        cands = yanit.get("candidates", [])
                         if cands and "content" in cands[0]:
                             parts = cands[0]["content"].get("parts", [])
                             if parts and "text" in parts[0]:
@@ -318,12 +436,15 @@ class GeminiAnalyzer:
                             time.sleep(backoff)
                             continue
                     elif res.status_code == 429:
-                        print(f" -> [UYARI] Google Gemini API ({current_model}) günlük kota veya hız limiti (429) dolmuş.")
+                        kota = gemini_kota_hatasini_isle(current_model, res)
+                        gemini_kullanimini_kaydet(current_model, asama, durum="429", kota=kota)
+                        print(f" -> [UYARI] Google Gemini API ({current_model}) kullanım sınırı (429): {kota}")
                         break
                     else:
                         print(f" -> [UYARI] Google Gemini API ({current_model}) HTTP Hatası: {res.status_code}")
                         break
                 except requests.exceptions.Timeout:
+                    gemini_kullanimini_kaydet(current_model, asama, durum="zaman_asimi")
                     print(f" -> [UYARI] Google Gemini API ({current_model}) zaman aşımına uğradı ({timeout_sec}s, Deneme {attempt + 1}/{retries + 1}).")
                     if attempt < retries:
                         time.sleep(1.0)
@@ -335,7 +456,8 @@ class GeminiAnalyzer:
         return None
 
     def _ollama_tekil_sentez(
-        self, istemi: str, timeout: Optional[int] = None, num_predict: Optional[int] = None
+        self, istemi: str, timeout: Optional[int] = None, num_predict: Optional[int] = None,
+        *, yanit_semasi: Optional[Dict[str, Any]] = None, sistem_istemi: str = "",
     ) -> Optional[Dict[str, Any]]:
         """Ollama ile tek bir bölüm için odaklı pedagojik sentez."""
         if self._ollama_devre_disi:
@@ -348,7 +470,7 @@ class GeminiAnalyzer:
                 "model": self.ollama_model,
                 "prompt": istemi,
                 "stream": False,
-                "format": "json",
+                "format": yanit_semasi or "json",
                 "think": False,
                 "options": {
                     "num_thread": 16,
@@ -356,6 +478,8 @@ class GeminiAnalyzer:
                     "temperature": 0.2
                 }
             }
+            if sistem_istemi:
+                payload["system"] = sistem_istemi
             res = requests.post(f"{self.ollama_url.rstrip('/')}/api/generate", json=payload, timeout=tout)
             if res.status_code == 200:
                 data = res.json()
@@ -388,13 +512,13 @@ class GeminiAnalyzer:
             print(f" -> [UYARI] Ollama bölüm sentezi beklenmedik hata: {e}")
         return None
 
-    def _gemini_rest_sentez(self, istemi: str, timeout: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def _gemini_rest_sentez(self, istemi: str, timeout: Optional[int] = None, *, asama: str) -> Optional[Dict[str, Any]]:
         """Gemini REST API ile hızlı pedagojik sentez (exponential backoff ve retry korumalı)."""
         payload = {
             "contents": [{"parts": [{"text": istemi}]}],
             "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
         }
-        return self._gemini_api_cagir(payload, timeout=timeout or self.gemini_timeout)
+        return self._gemini_api_cagir(payload, timeout=timeout or self.gemini_timeout, asama=asama)
 
     def gemini_fasikul_bolumu_uret(
         self,
@@ -436,15 +560,7 @@ class GeminiAnalyzer:
             "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
         }
         if bolum_turu_belirle:
-            payload["systemInstruction"] = {"parts": [{"text": (
-                "İstenen JSON'a bolum_turu ve bolum_turu_alintisi alanlarını ekle. "
-                "Bölüm türünü yalnızca öğretmenin transkriptinden belirle. Öğretmen bir soruyu "
-                "işlem yaparak, karşılaştırarak, eleyerek veya cevabını gerekçelendirerek çözüyorsa "
-                "bolum_turu soru_cozumu olsun. Şık harfi şart değildir. Öğretmen yalnızca bir "
-                "konuyu açıklıyorsa konu_anlatimi yaz. Yalnız konu duyurusu, karışık bölüm veya "
-                "emin olmadığın durumda belirsiz yaz. bolum_turu_alintisi alanında bu karara "
-                "dayanak olan ifadeyi transkriptten aynen al ve zaman damgalarını kopyalama."
-            )}]}
+            payload["systemInstruction"] = {"parts": [{"text": _BOLUM_TURU_ISTEMI}]}
         veri = None
         onbellek_yolu = None
         if onbellek_dizini is not None:
@@ -458,17 +574,16 @@ class GeminiAnalyzer:
                 pass
         onbellekten = isinstance(veri, dict)
         if not onbellekten:
-            veri = self._gemini_api_cagir(payload, timeout=max(60, self.gemini_timeout))
+            veri = self._gemini_api_cagir(payload, timeout=max(60, self.gemini_timeout), asama="ders_anlatimi")
         if not isinstance(veri, dict):
             return None
         anlatim = veri.get("duzenlenmis_anlatim")
         if not isinstance(anlatim, str) or not anlatim.strip():
             return None
 
-        secenek_deseni = r"\b([A-E])\s+(?:ş[ıi]k\w*|seçene\w*)"
-        secenekler = re.findall(secenek_deseni, ham, flags=re.IGNORECASE)
+        secenekler = _SECENEK_DESENI.findall(ham)
         if secenekler:
-            cevaplar = re.findall(secenek_deseni, anlatim, flags=re.IGNORECASE)
+            cevaplar = _SECENEK_DESENI.findall(anlatim)
             if not cevaplar or cevaplar[-1].upper() != secenekler[-1].upper():
                 return None
 
@@ -486,17 +601,7 @@ class GeminiAnalyzer:
         bolum["duzenlenmis_anlatim"] = bolum["pedagojik_anlatim"] = anlatim.strip()
         bolum["kaynak_tipi"] = "gemini"
         if bolum_turu_belirle:
-            tur = veri.get("bolum_turu")
-            dayanak = veri.get("bolum_turu_alintisi")
-            bolum["bolum_turu"] = "belirsiz"
-            if secenekler:
-                bolum["bolum_turu"] = "soru_cozumu"
-            elif (
-                tur in ("soru_cozumu", "konu_anlatimi")
-                and isinstance(dayanak, str) and len(dayanak.split()) >= 3
-                and " ".join(dayanak.casefold().split()) in " ".join(ham.casefold().split())
-            ):
-                bolum["bolum_turu"] = tur
+            bolum["bolum_turu"] = _fasikul_bolum_turu(ham, veri)
         bolum["kitap_referansi"] = ""
         bolum["rag_kaynaklari"] = []
         kaynak_id, alinti = veri.get("kaynak_id"), veri.get("kitap_alintisi")
@@ -532,13 +637,28 @@ class GeminiAnalyzer:
     def gemini_kitap_ek_bilgisi_sec(
         self, anlatim: str, adaylar: List[Dict[str, Any]], sinif: str,
     ) -> Optional[Dict[str, Any]]:
+        return self._kitap_ek_bilgisi_sec(anlatim, adaylar, sinif, gemini=True)
+
+    def ollama_kitap_ek_bilgisi_sec(
+        self, anlatim: str, adaylar: List[Dict[str, Any]], sinif: str,
+    ) -> Optional[Dict[str, Any]]:
+        return self._kitap_ek_bilgisi_sec(anlatim, adaylar, sinif, gemini=False)
+
+    def _kitap_ek_bilgisi_sec(
+        self, anlatim: str, adaylar: List[Dict[str, Any]], sinif: str, *, gemini: bool,
+    ) -> Optional[Dict[str, Any]]:
         """Ders anlatımını değiştirmeden kitapta yer alan bir açıklama seçer."""
         if not adaylar:
             return None
         parcalar = {i: aday["icerik"][:1500] for i, aday in enumerate(adaylar, 1)}
         veriler = json.dumps({"anlatim": anlatim, "kitap_parcalari": parcalar}, ensure_ascii=False)
-        istem = _fasikul_istemi("gemini-kitap-ek-bilgisi", sinif=sinif, veriler=veriler)
-        yanit = self._gemini_rest_sentez(istem, timeout=max(60, self.gemini_timeout))
+        if gemini:
+            istem = _fasikul_istemi("gemini-kitap-ek-bilgisi", sinif=sinif, veriler=veriler)
+            yanit = self._gemini_rest_sentez(istem, timeout=max(60, self.gemini_timeout), asama="kitap_ek_bilgisi")
+        else:
+            istem_adi = self._ollama_istem_adi("ollama-kitap-ek-bilgisi", "-kitap-ek-bilgisi")
+            istem = _fasikul_istemi(istem_adi, sinif=sinif, veriler=veriler)
+            yanit = self._ollama_tekil_sentez(istem, num_predict=320, yanit_semasi=_OLLAMA_KITAP_EKI_YANIT_SEMASI)
         if not isinstance(yanit, dict):
             return None
         kaynak_id = yanit.get("kaynak_id")
@@ -562,7 +682,10 @@ class GeminiAnalyzer:
         rag_sonuc: Dict[str, Any],
         sinif: str = "3. Sınıf",
         ders: str = "Fen Bilimleri",
-        egitim_seviyesi: str = "İlkokul"
+        egitim_seviyesi: str = "İlkokul",
+        *,
+        kitap_eki_ayri: bool = False,
+        transkript_icerigini_koru: bool = False,
     ) -> Dict[str, Any]:
         """
         Öğretmenin anlatımındaki bilimsel bilgileri ve
@@ -582,6 +705,18 @@ class GeminiAnalyzer:
         bilgi_bg = rag_sonuc.get("bilgi", {}).get("baglam", "")[:1000]
         pedagoji_bg = rag_sonuc.get("pedagoji", {}).get("baglam", "")[:700]
         kitap_bg = f"{bilgi_bg}\n{pedagoji_bg}".strip()
+        ek_yonerge = ""
+        if kitap_eki_ayri:
+            kitap_bg = ""
+            bolum["bolum_turu"] = "belirsiz"
+            ek_yonerge = (
+                "Bu bölümün ana anlatımı yalnızca öğretmenin konuşmasına dayanır. "
+                "Kitap bilgisi, konuşmada geçmeyen örnek veya dış bilgi ekleme. "
+                "Öğretmen soru çözüyorsa örnekleri, çözümün gerekçesini ve verdiği cevabı koru. "
+                "Öğretmenin açıkça söylediği doğru şıkkı ders anlatımında yaz.\n"
+                "Çıktı örneğinde görünmese bile JSON'a bolum_turu alanını ekle. "
+                + _BOLUM_TURU_KURALI
+            )
 
         istem_verileri = {
             "b_no": b_no,
@@ -593,31 +728,30 @@ class GeminiAnalyzer:
             "sinif": sinif,
             "egitim_seviyesi": egitim_seviyesi,
         }
-        model_etiketi = self.ollama_model.replace(":", "-")
-        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", model_etiketi) or not (
-            _FASIKUL_ISTEM_DIZINI / f"{model_etiketi}.txt"
-        ).is_file():
-            model_etiketi = "ollama-varsayilan"
-        istemi = _fasikul_istemi(model_etiketi, **istem_verileri)
+        istemi = _fasikul_istemi(self._ollama_istem_adi("ollama-varsayilan"), **istem_verileri)
 
         token_siniri = max(
             self.ollama_section_num_predict, min(1600, 450 + 3 * len(ham_transkript.split()))
         )
         veri = self._ollama_tekil_sentez(
-            istemi, timeout=self.ollama_section_timeout, num_predict=token_siniri
+            istemi, timeout=self.ollama_section_timeout, num_predict=token_siniri,
+            yanit_semasi=_OLLAMA_BOLUM_YANIT_SEMASI if kitap_eki_ayri else None,
+            sistem_istemi=ek_yonerge,
         )
         kaynak = "ollama"
         anlatim = (veri or {}).get("duzenlenmis_anlatim")
         if not isinstance(anlatim, str) or not anlatim.strip():
             if self._api_anahtari_var_mi():
-                veri = self._gemini_rest_sentez(
-                    _fasikul_istemi("gemini-ollama-yedek", **istem_verileri),
-                    timeout=self.gemini_timeout,
-                )
+                yedek_istemi = _fasikul_istemi("gemini-ollama-yedek", **istem_verileri)
+                if ek_yonerge:
+                    yedek_istemi += f"\n\n{ek_yonerge}"
+                veri = self._gemini_rest_sentez(yedek_istemi, timeout=self.gemini_timeout, asama="ders_anlatimi")
                 kaynak = "gemini"
                 anlatim = (veri or {}).get("duzenlenmis_anlatim")
 
         if isinstance(anlatim, str) and anlatim.strip():
+            if kitap_eki_ayri:
+                bolum["bolum_turu"] = _fasikul_bolum_turu(ham_transkript, veri, dayanak_zorunlu=False)
             baslik = veri.get("bolum_basligi")
             if isinstance(baslik, str) and baslik.strip() and len(baslik) <= 100:
                 bolum["bolum_basligi"] = baslik.strip()
@@ -628,11 +762,11 @@ class GeminiAnalyzer:
                     bolum[alan] = veri[alan]
             duzeltilmis = veri.get("orijinal_transkript")
             if ham_transkript and isinstance(duzeltilmis, str) and duzeltilmis.strip():
-                benzerlik = SequenceMatcher(
-                    None, ham_transkript.casefold().split(), duzeltilmis.casefold().split(), autojunk=False
-                ).ratio()
-                if benzerlik >= 0.8:
+                if (not transkript_icerigini_koru or kaynak != "ollama"
+                        or self._ollama_transkript_icerigi_korunuyor_mu(ham_transkript, duzeltilmis)):
                     bolum["transkript"] = duzeltilmis.strip()
+                else:
+                    print(f"[Ollama] Bölüm {b_no} transkript düzeltmesi içeriği korumadı. Ham transkript kullanılıyor.")
             bolum["kaynak_tipi"] = kaynak
         else:
             mevcut = bolum.get("duzenlenmis_anlatim")
@@ -706,7 +840,7 @@ class GeminiAnalyzer:
             "contents": [{"parts": [{"text": sistem_istemi}]}],
             "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
         }
-        veri = self._gemini_api_cagir(payload, timeout=self.gemini_timeout)
+        veri = self._gemini_api_cagir(payload, timeout=self.gemini_timeout, asama="video_analizi")
         if veri and "bolumler" in veri and len(veri["bolumler"]) > 0:
             print(f" -> [BAŞARILI] Google Gemini API ({self.model}) analiz ve materyal bölümlendirmeyi tamamladı ({len(veri['bolumler'])} bölüm).")
             return veri

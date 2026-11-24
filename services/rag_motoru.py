@@ -370,7 +370,7 @@ class RAGMotoru:
         k: int = 4,
         rerank: bool = True,
         allow_cross_grade: bool = False,
-        max_mesafe: float = RAG_MAX_MESAFE,
+        max_mesafe: Optional[float] = RAG_MAX_MESAFE,
     ) -> List[Document]:
         """
         Kullanıcının seçtiği eğitim seviyesine ve sınıf düzeyine ait belgeler arasında
@@ -958,6 +958,27 @@ class RAGMotoru:
                 break
 
         return bulunan_ornekler
+
+    def konu_alistirmalarini_getir(self, konu: str, egitim_seviyesi: str, sinif: str, ders: str) -> List[Document]:
+        """Dersle ilgili basılı soru ve etkinlik parçalarını sınıf içinde toplar."""
+        konular = self.seviye_filtreli_arama(konu, egitim_seviyesi, sinif=sinif, ders_adi=ders, k=8, max_mesafe=None)
+        unite = next((d.metadata.get("unite") for d in konular
+                      if d.metadata.get("ders_adi") == ders and d.metadata.get("unite")), None)
+        if not unite:
+            return []
+        alanlar = [{"sinif": sinif}, {"ders_adi": ders}, {"unite": unite}]
+        kayitlar = self.get_vector_store()._collection.get(where={"$and": alanlar}, include=["documents", "metadatas"])
+        adaylar = []
+        for metin, meta in zip(kayitlar["documents"], kayitlar["metadatas"]):
+            if not meta.get("kitap_adi") or not meta.get("has_printed_page") or meta.get("printed_page") is None:
+                continue
+            temiz = " ".join(metin.casefold().split())
+            puan = len(re.findall(r"\ba[).].+?\bb[).]|boşlukları|soruları.{0,35}cevapla|doğru.{0,15}yanlış", temiz)) * 3
+            puan += temiz.count("?")
+            if puan:
+                adaylar.append((puan, Document(page_content=metin, metadata=meta)))
+        adaylar.sort(key=lambda aday: aday[0], reverse=True)
+        return [belge for _, belge in adaylar[:18]]
 
     def dosya_metadata_ayristir(self, dosya_adi: str) -> Dict[str, str]:
         """

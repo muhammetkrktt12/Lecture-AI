@@ -632,16 +632,17 @@ class VideoProcessor:
     def transkript_olustur(
         self,
         video_yolu: Any,
-        model_boyutu: str = "small",
+        model_boyutu: str = "large-v3-turbo",
         zorla_yeniden: bool = False,
     ) -> Path:
         """
         faster-whisper ile videonun konuşma transkriptini GPU (CUDA) hızlandırmasıyla çıkarır.
-        Sonucu video_yolu.transkript.txt dosyasına kaydeder ve döndürür.
-        Önceden oluşturulmuş dosya varsa doğrudan önbellekten kullanır.
+        Sonucu model adıyla ayrılmış transkript dosyasına kaydeder ve döndürür.
+        Aynı modelin önceden oluşturduğu transkript önbellekten okunur.
         """
         video_p = Path(video_yolu)
-        cikti_p = video_p.with_suffix(".transkript.txt")
+        model_etiketi = re.sub(r"[^a-zA-Z0-9._-]", "_", model_boyutu)
+        cikti_p = video_p.with_suffix(f".{model_etiketi}.transkript.txt")
 
         if cikti_p.is_file() and cikti_p.stat().st_size > 0 and not zorla_yeniden:
             print(f"[VideoProcessor] Mevcut transkript dosyası bulundu (önbellek): {cikti_p.name}")
@@ -651,11 +652,14 @@ class VideoProcessor:
         self._cuda_ortamini_hazirla()
         from faster_whisper import WhisperModel
 
+        yerel_model = ROOT / "temp_medya" / f"whisper-{model_etiketi}"
+        model_kaynagi = str(yerel_model) if (yerel_model / "model.bin").is_file() else model_boyutu
+
         with TemporaryDirectory(dir=cikti_p.parent) as gecici_dizin:
             gecici_yol = Path(gecici_dizin) / cikti_p.name
 
             def _transkripti_yaz(device: str, compute_type: str) -> None:
-                model = WhisperModel(model_boyutu, device=device, compute_type=compute_type)
+                model = WhisperModel(model_kaynagi, device=device, compute_type=compute_type)
                 parcalar, _ = model.transcribe(str(video_p), language="tr", vad_filter=True)
                 with gecici_yol.open("w", encoding="utf-8") as dosya:
                     for parca in parcalar:

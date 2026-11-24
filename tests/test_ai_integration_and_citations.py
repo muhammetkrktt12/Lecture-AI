@@ -17,10 +17,14 @@ Bu test paketi 10 kritik senaryoyu doğrular:
 
 import os
 import json
+import sys
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch, MagicMock
 
 import requests
+from langchain_core.documents import Document
 
 from services.gemini_analyzer import GeminiAnalyzer
 from services.question_generator import QuestionGenerator
@@ -34,6 +38,139 @@ class TestAIIntegrationAndCitations(unittest.TestCase):
         self.analyzer = GeminiAnalyzer(api_key="AIzaTestKeyForMockingOnly123456789")
         self.qgen = QuestionGenerator(api_key="AIzaTestKeyForMockingOnly123456789")
         self.pdf_gen = PDFGenerator()
+
+    def test_pdf_reprint_preserves_content_without_loading_analysis(self):
+        from ders_pdf import main
+        from PIL import Image
+        from pypdf import PdfReader
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            frame = root / "kare.png"
+            Image.new("RGB", (120, 60), "white").save(frame)
+            generator = PDFGenerator(root)
+            once = generator.pdf_olustur(
+                {"unite_basligi": "Elektrikli Araçlar", "bolumler": [
+                    {"ekran_goruntusu_yolu": str(frame), "duzenlenmis_anlatim": "El feneri pille çalışır."},
+                ]},
+                sorular=[{"no": 1, "soru": "El feneri ne ile çalışır?", "dogru_cevap": "Pil"}],
+                cikis_dosya_adi="ders.pdf", icerigi_kaydet=True,
+            )
+            content = Path(once["icerik_yolu"])
+            original = content.read_bytes()
+            with (
+                patch.object(sys, "argv", ["ders_pdf.py", "--yeniden-bas", str(content)]),
+                patch("services.pdf_generator.PDFGenerator", return_value=generator),
+                patch.dict(sys.modules, {"core.eduframe_agentic_core": None}),
+                patch("requests.sessions.Session.request", side_effect=AssertionError("Beklenmeyen ağ isteği")),
+            ):
+                self.assertEqual(main(), 0)
+
+            reprinted = PdfReader(next(root.glob("ders_yeniden_*.pdf")))
+            first = PdfReader(once["pdf_path"])
+            self.assertEqual([p.extract_text() for p in reprinted.pages], [p.extract_text() for p in first.pages])
+            self.assertEqual(content.read_bytes(), original)
+
+    def test_gemini_questions_fall_back_to_ollama_and_verify_book_quotes(self):
+        turler = ["Çoktan Seçmeli"] * 5 + ["Doğru - Yanlış"] * 3 + ["Boşluk Doldurma"] * 2
+        soru_verisi = {
+            "Çoktan Seçmeli": (["A) Pil", "B) Priz", "C) Motor", "D) Lamba"], "A"),
+            "Doğru - Yanlış": (["Doğru", "Yanlış"], "Doğru"),
+            "Boşluk Doldurma": ([], "Pil"),
+        }
+        sorular = []
+        for no, tip in enumerate(turler, 1):
+            secenekler, cevap = soru_verisi[tip]
+            bosluk = "____" if tip == "Boşluk Doldurma" else "pil"
+            sorular.append(dict(tip=tip, kategori="Günlük yaşam", ilgili_kavram="Pil", soru=f"Örnek {no}: {bosluk}",
+                                secenekler=secenekler, dogru_cevap=cevap, aciklama="El feneri pille çalışır."))
+        alinti = "Küçük el fenerleri hangi kaynakla çalışır?"
+        rag = MagicMock()
+        rag.seviye_filtreli_arama.return_value = [Document(page_content=alinti, metadata={
+            "sinif": "3. Sınıf", "ders_adi": "Fen Bilimleri", "kitap_adi": "MEB Fen Bilimleri",
+            "has_printed_page": True, "printed_page": 48, "chunk_id": "pil-48",
+        })]
+        rag.konu_alistirmalarini_getir.return_value = rag.seviye_filtreli_arama.return_value
+        with (
+            patch.object(self.qgen, "_gemini_ile_soru_uret", return_value=sorular[:1]),
+            patch.object(self.qgen, "_ollama_ile_soru_uret", side_effect=[sorular, [
+                {"soru_no": 1, "parca_no": 1, "alinti": alinti, "tur": "alistirma"},
+                {"soru_no": 2, "parca_no": 1, "alinti": "Metinde bulunmayan uydurma bir cümle."},
+            ], None, None, None, None]) as ollama,
+        ):
+            sonuc = self.qgen.gemini_sorularini_uret({
+                "sinif_duzeyi": "3. Sınıf", "ders_adi": "Fen Bilimleri", "unite_basligi": "Pil",
+                "bolumler": [{"duzenlenmis_anlatim": "Pil araçlara enerji sağlar."}],
+            }, "İlkokul", [{"ornek_metin": "Örnek alıştırma biçimi"}], rag)
+
+        self.assertEqual(len(sonuc), 10)
+        self.assertTrue(all(s["kaynak_tipi"] == "ollama" for s in sonuc))
+        self.assertIn("Pil araçlara enerji sağlar.", ollama.call_args_list[0].args[0])
+        self.assertIn("Örnek alıştırma biçimi", ollama.call_args_list[0].args[0])
+        self.assertIn(alinti, ollama.call_args_list[0].args[0])
+        self.assertEqual(rag.seviye_filtreli_arama.call_count, 10)
+        self.assertIsNone(rag.seviye_filtreli_arama.call_args.kwargs["max_mesafe"])
+        self.assertEqual(sonuc[0]["kazanim_referansi"], "İlgili alıştırma: MEB Fen Bilimleri, basılı sayfa 48")
+        self.assertFalse(sonuc[1]["rag_dogrulandi"])
+
+    def test_ollama_pdf_adds_verified_book_support_after_synthesis(self):
+        from core.eduframe_agentic_core import gemini_analiz_dugumu
+
+        anlatimlar = [
+            "Piller az enerji harcayan araçlarda kullanılır.",
+            "Küçük araçların bazıları pille çalışır.",
+            "Doğru cevap C şıkkıdır.",
+            "Televizyon ve ütü prize takılır. Şehir elektriğiyle çalışan iki araç vardır.",
+        ]
+        transkriptler = [
+            "Piller, az enerji harcayan araçlarda kullanılır.",
+            "Bazı küçük araçlar pille çalışır.",
+            "El feneri pil ile çalışır. Bu nedenle C şıkkı doğrudur.",
+            "Kaç araç şehir elektriğiyle çalışır? Televizyon ve ütü prize takılır. İki araç var.",
+        ]
+        bolumler = [
+            {"bolum_no": no, "transkript": ham}
+            for no, ham in enumerate(transkriptler, 1)
+        ]
+        state = {"anlatim_modeli": "ollama", "video_analizi": {
+            "bolumler": bolumler, "egitim_seviyesi": "İlkokul",
+            "sinif_duzeyi": "3. Sınıf", "ders_adi": "Fen Bilimleri",
+        }}
+        alinti = "Kablosuz çalışan radyonun elektrik kaynağı pildir."
+        belge = Document(page_content=alinti, metadata={
+            "kitap_adi": "MEB Fen Bilimleri", "has_printed_page": True, "printed_page": 47,
+        })
+        ana_yanitlar = [
+            {"duzenlenmis_anlatim": anlatim, "bolum_turu": tur}
+            for anlatim, tur in zip(anlatimlar, ["konu_anlatimi"] * 3 + ["soru_cozumu"])
+        ]
+        kitap_yanitlari = [
+            {"kaynak_id": 1, "kitap_alintisi": alinti, "desteklenen_cumle": anlatim}
+            for anlatim in anlatimlar[:2]
+        ]
+        with (
+            patch("core.eduframe_agentic_core.RAGMotoru") as rag_sinifi,
+            patch.object(GeminiAnalyzer, "_ollama_tekil_sentez", side_effect=ana_yanitlar + kitap_yanitlari) as ollama,
+        ):
+            rag = rag_sinifi.return_value
+            rag.seviye_filtreli_arama.return_value = [belge]
+            rag.metin_benzerlikleri.return_value = [0.4, 0.8]
+            gemini_analiz_dugumu(state)
+
+        sorgular = [arama.kwargs["sorgu"] for arama in rag.seviye_filtreli_arama.call_args_list]
+        self.assertEqual(sorgular, anlatimlar[:2])
+        self.assertEqual([b["duzenlenmis_anlatim"] for b in bolumler], anlatimlar)
+        for istek in ollama.call_args_list[:len(bolumler)]:
+            self.assertNotIn(alinti, istek.args[0])
+        for istek in ollama.call_args_list[len(bolumler):]:
+            self.assertIn(alinti, istek.args[0])
+        self.assertNotIn("kitap_ek_bilgisi", bolumler[0])
+        self.assertEqual(bolumler[1]["kitap_ek_bilgisi"], alinti)
+        self.assertEqual(bolumler[1]["kitap_referansi"], "MEB Fen Bilimleri, basılı sayfa 47")
+        for bolum in bolumler[2:]:
+            self.assertEqual(bolum["bolum_turu"], "soru_cozumu")
+            self.assertNotIn("kitap_ek_bilgisi", bolum)
+        self.assertEqual(len(state["video_analizi"]["tum_kaynaklar"]), 1)
 
     # -----------------------------------------------------------------------
     # SENARYO 1: Ollama Başarılı Yanıt Senaryosu

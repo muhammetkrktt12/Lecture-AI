@@ -17,10 +17,14 @@ Mizanpaj Mimarisi:
 """
 
 import os
+import json
 import sys
 import re
 from datetime import datetime
+from functools import partial
 from pathlib import Path
+from random import choice
+from tempfile import NamedTemporaryFile
 from typing import Dict, Any, List, Optional
 from xml.sax.saxutils import escape
 
@@ -28,9 +32,10 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from utils.lexical_tools import kavram_anahtari
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
@@ -39,6 +44,7 @@ from reportlab.platypus import (
     Table,
     TableStyle,
     KeepTogether,
+    Flowable,
     HRFlowable,
     PageBreak,
 )
@@ -54,39 +60,148 @@ except ImportError:
     OUTPUTS_DIR = ROOT / "temp_medya" / "outputs"
 
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+_CERCEVE_DIZINI = ROOT / "templates" / "cerceveler"
+_SABLON_YAN_BOSLUK = 65
+_SABLON_UST_BOSLUK = 80
+_SABLON_ALT_BOSLUK = 62
 
 
 # ---------------------------------------------------------------------------
 # TÜRKÇE FONT YÖNETİMİ
 # ---------------------------------------------------------------------------
 def _turkce_fontlari_yukle():
-    """Windows Arial fontlarını ReportLab'e kaydeder."""
-    font_path = "C:/Windows/Fonts/arial.ttf"
-    bold_path = "C:/Windows/Fonts/arialbd.ttf"
-    italic_path = "C:/Windows/Fonts/ariali.ttf"
+    """Örnekteki Calibri ve Aptos yüzlerini yerel fontlardan yükler."""
     try:
-        if os.path.exists(font_path):
-            pdfmetrics.registerFont(TTFont("EduArial", font_path))
-            pdfmetrics.registerFont(TTFont("EduArial-Bold", bold_path if os.path.exists(bold_path) else font_path))
-            pdfmetrics.registerFont(TTFont("EduArial-Italic", italic_path if os.path.exists(italic_path) else font_path))
-            return "EduArial", "EduArial-Bold", "EduArial-Italic"
+        font_dir = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+        normal, kalin, italik = "EduCalibri", "EduCalibri-Bold", "EduCalibri-Italic"
+        for ad, dosya in zip((normal, kalin, italik), ("calibri.ttf", "calibrib.ttf", "calibrii.ttf")):
+            pdfmetrics.registerFont(TTFont(ad, str(font_dir / dosya)))
+        pdfmetrics.registerFontFamily(normal, normal=normal, bold=kalin, italic=italik, boldItalic=kalin)
     except Exception as e:
-        print(f"[UYARI] Arial fontu yüklenemedi: {e}")
-    return "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+        print(f"[UYARI] Calibri fontu yüklenemedi: {e}")
+        normal, kalin, italik = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+
+    aptos = {b"Aptos": normal, b"Aptos-Bold": kalin, b"Aptos-Italic": italik}
+    ofis_fontlari = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local")))
+    ofis_fontlari = ofis_fontlari / "Microsoft/FontCache/4/CloudFonts/Aptos"
+    for yol in (*font_dir.glob("aptos*.ttf"), *ofis_fontlari.glob("*.ttf")):
+        try:
+            font = TTFont(f"EduFont-{yol.stem}", str(yol))
+            if font.face.name in aptos:
+                pdfmetrics.registerFont(font)
+                aptos[font.face.name] = font.fontName
+        except (OSError, ValueError):
+            continue
+    return normal, kalin, aptos[b"Aptos"], aptos[b"Aptos-Bold"], aptos[b"Aptos-Italic"]
 
 
-FONT_REG, FONT_BOLD, FONT_ITALIC = _turkce_fontlari_yukle()
+FONT_REG, FONT_BOLD, FONT_APTOS, FONT_APTOS_BOLD, FONT_APTOS_ITALIC = _turkce_fontlari_yukle()
+
+
+class _SayfaKaynagi(Flowable):
+    def __init__(self, metin=""):
+        super().__init__()
+        self.metin = metin
+
+    def draw(self):
+        self.canv._ders_kitabi_referansi = self.metin
+
+
+class _DersKutusu(Flowable):
+    """Başlık ve metni ayrı konumlandırır, yalnızca metni sayfalara böler."""
+
+    def __init__(self, baslik, metin, dolgu, kenar, alt_bosluk):
+        super().__init__()
+        self.baslik, self.metin = baslik, metin
+        self.dolgu, self.kenar, self.alt_bosluk = dolgu, kenar, alt_bosluk
+
+    def wrap(self, availWidth, availHeight):
+        self.width = availWidth
+        icerik = availWidth - 16
+        self._baslik_yuksekligi = self.baslik.wrap(icerik, availHeight)[1] if self.baslik else 0
+        self._metin_ustu = 6 + self._baslik_yuksekligi + (8 if self.baslik else 0)
+        self.height = self._metin_ustu + self.metin.wrap(icerik, availHeight)[1] + self.alt_bosluk
+        return self.width, self.height
+
+    def split(self, availWidth, availHeight):
+        self.wrap(availWidth, availHeight)
+        pay = availHeight - self._metin_ustu - self.alt_bosluk
+        if pay < 2 * self.metin.style.leading:
+            return []
+        parcalar = self.metin.split(availWidth - 16, pay)
+        if len(parcalar) < 2:
+            return []
+        return [_DersKutusu(self.baslik if i == 0 else None, p, self.dolgu, self.kenar, self.alt_bosluk)
+                for i, p in enumerate(parcalar)]
+
+    def draw(self):
+        self.canv.setFillColor(self.dolgu)
+        if self.kenar:
+            self.canv.setStrokeColor(self.kenar)
+            self.canv.setLineWidth(0.65)
+        self.canv.rect(0, 0, self.width, self.height, fill=1, stroke=int(bool(self.kenar)))
+        if self.baslik:
+            self.baslik.drawOn(self.canv, 8, self.height - 6 - self._baslik_yuksekligi)
+        self.metin.drawOn(self.canv, 8, self.alt_bosluk)
 
 
 # ---------------------------------------------------------------------------
 # SAYFA NUMARALANDIRMA (SAYFA X / Y)
 # ---------------------------------------------------------------------------
+class _KavramKutusu(Flowable):
+    """Yer kalmazsa kavramları sonraki ders bölümünün kutusuna bırakır."""
+
+    _ZEROSIZE = True
+
+    def __init__(self, bolum_no, kavramlar, bekleyenler, baslik_stili, metin_stili, son_bolum):
+        super().__init__()
+        self.bolum_no, self.kavramlar, self.bekleyenler = bolum_no, kavramlar, bekleyenler
+        self.baslik_stili, self.metin_stili = baslik_stili, metin_stili
+        self.son_bolum = son_bolum
+
+    def wrap(self, availWidth, availHeight):
+        self._ogeler = self.bekleyenler + self.kavramlar
+        satirlar = [metin if no == self.bolum_no else f'{metin} <font size="10">({no}. bölüm)</font>'
+                    for no, metin in self._ogeler]
+        metin = "<br/>".join(satirlar) or "<b>Bu bölümde önemli bir kavram bulunmamaktadır.</b>"
+        kutu = _DersKutusu(Paragraph("Önemli Kavramlar", self.baslik_stili), Paragraph(metin, self.metin_stili),
+                          colors.HexColor("#D9F2D0"), None, 6 if self.bolum_no == 1 else 15)
+        self._aralik = 7 if self.bolum_no == 1 else 20
+        genislik, yukseklik = kutu.wrap(availWidth, availHeight - self._aralik)
+        if yukseklik + self._aralik <= availHeight or (self.son_bolum and self._ogeler):
+            self._kutu = kutu
+            return genislik, yukseklik + self._aralik
+        self._kutu = None
+        return availWidth, 0
+
+    def split(self, availWidth, availHeight):
+        self.wrap(availWidth, availHeight)
+        return self._kutu.split(availWidth, availHeight) if self._kutu else []
+
+    def draw(self):
+        if self._kutu:
+            self._kutu.drawOn(self.canv, 0, 0)
+            self.bekleyenler.clear()
+        else:
+            self.bekleyenler[:] = self._ogeler
+
+
 class NumberedCanvas(canvas.Canvas):
     """Her sayfanın altına toplam sayfa sayısıyla birlikte numaralandırma ekler."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, cerceve=None, ust_kayma=0, alt_kayma=0, **kwargs):
         super().__init__(*args, **kwargs)
         self._saved_page_states = []
+        self._cerceve = cerceve
+        self._ust_kayma = ust_kayma
+        self._alt_kayma = alt_kayma
+        self._ders_kitabi_referansi = ""
+
+    def cerceveyi_ciz(self):
+        if self._cerceve and self._cerceve.stem == "1":
+            self.drawImage(str(self._cerceve), 0, -19.7, 607.45, 873.66)
+        elif self._cerceve:
+            self.drawImage(str(self._cerceve), 0, 0, *self._pagesize, preserveAspectRatio=True, anchor="c")
 
     def showPage(self):
         self._saved_page_states.append(dict(self.__dict__))
@@ -102,20 +217,28 @@ class NumberedCanvas(canvas.Canvas):
 
     def draw_page_decorations(self, total_pages):
         self.saveState()
-        self.setFont(FONT_REG, 8)
-        self.setFillColor(colors.HexColor("#64748b"))
+        sol = _SABLON_YAN_BOSLUK + 6
+        sag = self._pagesize[0] - sol
+        self.setFont(FONT_APTOS, 11)
+        self.setFillColor(colors.HexColor("#242424"))
+        self.drawString(sol, self._pagesize[1] - 67.2 - self._ust_kayma, "Lectra AI – Otonom Ders Notu Oluşturucu")
+        self.setLineWidth(0.45)
+        self.setStrokeColor(colors.HexColor("#D5DDE2"))
+        ust_cizgi = self._pagesize[1] - 77 - self._ust_kayma
+        self.line(sol, ust_cizgi, sag, ust_cizgi)
+        self.line(sol, 65.5 + self._alt_kayma, sag, 65.5 + self._alt_kayma)
 
-        # Üst bilgi
-        self.drawString(42, 805, "EduFrame AI – Otonom Ders Notu ve Pedagojik Fasikül")
-        self.setStrokeColor(colors.HexColor("#e2e8f0"))
-        self.setLineWidth(0.5)
-        self.line(42, 800, 553, 800)
-
-        # Alt bilgi
         page_str = f"Sayfa {self._pageNumber} / {total_pages}"
-        self.drawRightString(553, 30, page_str)
-        self.drawString(42, 30, "Bu ders notu video görsel materyalleri ve MEB müfredat kaynakları referans alınarak üretilmiştir.")
-        self.line(42, 40, 553, 40)
+        self.setFont(FONT_APTOS, 9)
+        self.setFillColor(colors.HexColor("#52646B"))
+        self.drawRightString(sag, 43 + self._alt_kayma, page_str)
+        if self._ders_kitabi_referansi:
+            kaynak = Paragraph(escape(self._ders_kitabi_referansi), ParagraphStyle(
+                "EduFooterSource", fontName=FONT_APTOS_ITALIC, fontSize=9, leading=11.8,
+                textColor=colors.HexColor("#242424"),
+            ))
+            _, yukseklik = kaynak.wrap(sag - sol, 28)
+            kaynak.drawOn(self, sol, 63.5 + self._alt_kayma - yukseklik)
 
         self.restoreState()
 
@@ -135,220 +258,63 @@ class PDFGenerator:
     def __init__(self, cikti_dizini: Optional[Path] = None):
         self.cikti_dizini = Path(cikti_dizini) if cikti_dizini else OUTPUTS_DIR
         self.cikti_dizini.mkdir(parents=True, exist_ok=True)
+        self._icerik_genisligi = 511
         self._stilleri_hazirla()
 
     def _stilleri_hazirla(self):
-        """ReportLab tipografi ve paragraf stillerini yapılandırır."""
-        self.styles = getSampleStyleSheet()
+        """Başlıklar, ana metin ve yardımcı bilgiler için ortak tipografi."""
+        def stil(ad, punto, satir, renk="#26333D", font=FONT_REG, **ayarlar):
+            return ParagraphStyle(ad, fontName=font, fontSize=punto, leading=satir,
+                                  textColor=colors.HexColor(renk), **ayarlar)
 
-        self.style_super_title = ParagraphStyle(
-            "EduSuperTitle",
-            fontName=FONT_BOLD,
-            fontSize=17,
-            leading=21,
-            textColor=colors.HexColor("#1e3a8a"),
-            spaceAfter=3,
-        )
+        self.style_super_title = stil("EduTitle", 16, 20, "#000000", FONT_BOLD, keepWithNext=True)
+        self.style_doc_title = ParagraphStyle("EduDocTitle", parent=self.style_super_title, alignment=1)
+        self.style_section_title = stil("EduSection", 14, 18, "#000000", FONT_BOLD, keepWithNext=True)
+        self.style_meta = stil("EduMeta", 10, 13, "#156082", FONT_APTOS_BOLD, keepWithNext=True)
+        self.style_time = stil("EduTime", 11, 14, "#156082", FONT_BOLD, alignment=2)
+        self.style_first_time = ParagraphStyle("EduTimeFirst", parent=self.style_time, fontSize=10)
+        self.style_box_label = stil("EduLabel", 13, 17.2, "#000000", FONT_BOLD, keepWithNext=True)
+        self.style_pedagogical = stil("EduBody", 13, 17.2, "#000000", allowWidows=0, allowOrphans=0)
+        self.style_concept_body = stil("EduConcept", 13, 17.2, "#275317")
+        self.style_ref_tag = stil("EduSource", 10.5, 14, "#52646B", spaceAfter=6)
+        self.style_card_header = stil("EduQuestionHeader", 11, 15, "#356864", FONT_BOLD)
+        self.style_card_qtext = stil("EduQuestion", 13, 17)
+        self.style_card_options = stil("EduOptions", 13, 17)
 
-        self.style_sub_title = ParagraphStyle(
-            "EduSubTitle",
-            fontName=FONT_BOLD,
-            fontSize=13,
-            leading=16,
-            textColor=colors.HexColor("#0f172a"),
-            spaceAfter=6,
-        )
+    def _ders_kutusu(self, baslik, metin, dolgu, kenar=None, *, stil=None, alt_bosluk=14):
+        return _DersKutusu(Paragraph(baslik, self.style_box_label),
+                          Paragraph(metin, stil or self.style_pedagogical),
+                          colors.HexColor(dolgu), colors.HexColor(kenar) if kenar else None, alt_bosluk)
 
-        self.style_meta = ParagraphStyle(
-            "EduMeta",
-            fontName=FONT_BOLD,
-            fontSize=8.5,
-            leading=12,
-            textColor=colors.HexColor("#2563eb"),
-        )
-
-        self.style_section_title = ParagraphStyle(
-            "EduSectionTitle",
-            fontName=FONT_BOLD,
-            fontSize=11.5,
-            leading=14,
-            textColor=colors.HexColor("#1e293b"),
-        )
-
-        self.style_time_badge = ParagraphStyle(
-            "EduTimeBadge",
-            fontName=FONT_BOLD,
-            fontSize=8.5,
-            leading=11,
-            textColor=colors.HexColor("#0369a1"),
-            alignment=2,  # Sağa yasla
-        )
-
-        self.style_box_label = ParagraphStyle(
-            "EduBoxLabel",
-            fontName=FONT_BOLD,
-            fontSize=8,
-            leading=10,
-            textColor=colors.HexColor("#334155"),
-            spaceAfter=2,
-        )
-
-        self.style_transcript = ParagraphStyle(
-            "EduTranscript",
-            fontName=FONT_ITALIC,
-            fontSize=8,
-            leading=11.5,
-            textColor=colors.HexColor("#475569"),
-        )
-
-        self.style_pedagogical = ParagraphStyle(
-            "EduPedagogical",
-            fontName=FONT_REG,
-            fontSize=8.5,
-            leading=12.5,
-            textColor=colors.HexColor("#1e3a8a"),
-        )
-
-        self.style_concept_body = ParagraphStyle(
-            "EduConceptBody",
-            fontName=FONT_REG,
-            fontSize=8,
-            leading=11,
-            textColor=colors.HexColor("#166534"),
-        )
-
-        self.style_ref_tag = ParagraphStyle(
-            "EduRefTag",
-            fontName=FONT_ITALIC,
-            fontSize=6.8,
-            leading=8.8,
-            textColor=colors.HexColor("#475569"),
-        )
-
-        self.style_general_summary = ParagraphStyle(
-            "EduGenSummary",
-            fontName=FONT_REG,
-            fontSize=9.5,
-            leading=14.5,
-            textColor=colors.HexColor("#1e293b"),
-        )
-
-        # Soru Kart Stilleri (Modern & Ferah)
-        self.style_card_header = ParagraphStyle(
-            "EduCardHeader",
-            fontName=FONT_BOLD,
-            fontSize=9,
-            leading=12,
-            textColor=colors.HexColor("#0f172a"),
-        )
-
-        self.style_card_qtext = ParagraphStyle(
-            "EduCardQText",
-            fontName=FONT_REG,
-            fontSize=8.5,
-            leading=12.5,
-            textColor=colors.HexColor("#1e293b"),
-        )
-
-        self.style_card_options = ParagraphStyle(
-            "EduCardOptions",
-            fontName=FONT_REG,
-            fontSize=8,
-            leading=11.5,
-            textColor=colors.HexColor("#334155"),
-        )
-
-        self.style_table_header = ParagraphStyle(
-            "EduTblHdr",
-            fontName=FONT_BOLD,
-            fontSize=7.5,
-            leading=9.5,
-            textColor=colors.white,
-            alignment=1,
-        )
-
-        self.style_table_cell = ParagraphStyle(
-            "EduTblCell",
-            fontName=FONT_REG,
-            fontSize=6.8,
-            leading=8.8,
-            textColor=colors.HexColor("#1e293b"),
-        )
-
-        self.style_table_cell_bold = ParagraphStyle(
-            "EduTblCellBold",
-            fontName=FONT_BOLD,
-            fontSize=6.8,
-            leading=8.8,
-            textColor=colors.HexColor("#1e293b"),
-            alignment=1,
-        )
-
-    def _kutu_olustur(self, baslik: str, paragraf: Paragraph, bg_color: str, border_color: str) -> Table:
-        """İçerik kutusu oluşturur (Transkript, Konu Anlatımı vb. için)."""
+    def _modern_soru_karti(self, soru: Dict[str, Any]) -> Table:
+        no = escape(str(soru.get("no", 1)))
+        kategori = escape(str(soru.get("kategori") or "Değerlendirme"))
+        tip = escape(str(soru.get("tip") or "Çoktan Seçmeli"))
+        kavram = escape(str(soru.get("ilgili_kavram") or ""))
+        secenekler = soru.get("secenekler") or []
         icerik = [
-            [Paragraph(f"<b>{baslik}</b>", self.style_box_label)],
-            [paragraf]
+            Paragraph(f"Soru {no} · {kategori} · {tip}", self.style_card_header),
         ]
-        t = Table(icerik, colWidths=[511], splitInRow=1)
-        t.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(bg_color)),
-            ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor(border_color)),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ("LEFTPADDING", (0, 0), (-1, -1), 7),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-        ]))
-        return t
-
-    def _modern_soru_karti(self, soru_dict: Dict[str, Any]) -> Table:
-        """
-        Her değerlendirme sorusunu modern, ferah ve sol aksanlı kart kutusu olarak üretir.
-        """
-        no = soru_dict.get("no", 1)
-        kategori = soru_dict.get("kategori", "💡 Soru")
-        kavram = soru_dict.get("ilgili_kavram", "Genel Kavram")
-        tip = soru_dict.get("tip", "Çoktan Seçmeli")
-        soru_metni = soru_dict.get("soru", "")
-        secenekler = soru_dict.get("secenekler", [])
-
-        # Üst Başlık Şeridi
-        ust_metin = (
-            f"<b>SORU {no}</b> &nbsp;&nbsp;|&nbsp;&nbsp; "
-            f"<font color='#0284c7'><b>{kategori}</b></font> &nbsp;&nbsp;|&nbsp;&nbsp; "
-            f"<i>{tip}</i> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "
-            f"<font color='#059669'><b>Hedef Kavram:</b> {kavram}</font>"
-        )
-
-        hucreler = [
-            [Paragraph(ust_metin, self.style_card_header)],
-            [Spacer(1, 2)],
-            [Paragraph(soru_metni, self.style_card_qtext)],
-        ]
-
-        if secenekler and len(secenekler) > 2:
-            sec_metin = "<br/>".join([f"&nbsp;&nbsp;&nbsp;&nbsp;<b>{opt[:2]}</b> {opt[2:].strip()}" for opt in secenekler])
-            hucreler.append([Spacer(1, 2)])
-            hucreler.append([Paragraph(sec_metin, self.style_card_options)])
-        elif secenekler and len(secenekler) == 2:
-            sec_metin = f"&nbsp;&nbsp;&nbsp;&nbsp;[ &nbsp;&nbsp; ] <b>Doğru</b> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [ &nbsp;&nbsp; ] <b>Yanlış</b>"
-            hucreler.append([Spacer(1, 2)])
-            hucreler.append([Paragraph(sec_metin, self.style_card_options)])
+        if kavram:
+            icerik.append(Paragraph(f"Hedef kavram · {kavram}", self.style_ref_tag))
+        icerik.append(Paragraph(escape(str(soru.get("soru") or "")), self.style_card_qtext))
+        icerik.append(Spacer(1, 5))
+        if len(secenekler) > 2:
+            metin = "<br/>".join(escape(str(secenek)) for secenek in secenekler)
+        elif len(secenekler) == 2:
+            metin = "[ &nbsp; ] Doğru &nbsp;&nbsp;&nbsp;&nbsp; [ &nbsp; ] Yanlış"
         else:
-            hucreler.append([Spacer(1, 2)])
-            hucreler.append([Paragraph("<b>Cevap Alanı:</b> .....................................................................................................................", self.style_card_options)])
-
-        t = Table(hucreler, colWidths=[511])
-        t.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
-            ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#e2e8f0")),
-            ("LINEBEFORE", (0, 0), (0, -1), 3.0, colors.HexColor("#0284c7")),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            metin = "Cevap &nbsp; __________________________________"
+        icerik.append(Paragraph(metin, self.style_card_options))
+        kart = Table([[icerik]], colWidths=[self._icerik_genisligi], splitInRow=1)
+        kart.setStyle(TableStyle([
+            ("LINEABOVE", (0, 0), (-1, 0), 0.7, colors.HexColor("#B9D0CA")),
+            ("TOPPADDING", (0, 0), (-1, -1), 9),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
         ]))
-        return t
+        return kart
 
     @staticmethod
     def _temizle_dosya_yolu(metin: str) -> str:
@@ -560,6 +526,9 @@ class PDFGenerator:
         sorular: Optional[List[Dict[str, Any]]] = None,
         video_kaynak_bilgisi: str = "Video Anlatımı",
         cikis_dosya_adi: Optional[str] = None,
+        *,
+        icerigi_kaydet: bool = False,
+        cerceve_adi: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Zaman damgalı görsel materyal bölümlerinden PDF ders fasikülü üretir.
@@ -570,248 +539,239 @@ class PDFGenerator:
         ders_adi = (video_analizi.get("ders_adi") or "FEN BİLİMLERİ").upper()
         ham_unite = video_analizi.get("unite_basligi") or "Elektrikli Araçlar ve Elektrik Kaynakları"
         unite_basligi = self._temizle_dosya_yolu(ham_unite)
-        temiz_video_kaynak = self._temizle_dosya_yolu(video_kaynak_bilgisi)
-        egitim_seviyesi = video_analizi.get("egitim_seviyesi", "İlkokul")
         sinif_duzeyi = video_analizi.get("sinif_duzeyi", "3. Sınıf")
-        tarih_str = datetime.now().strftime("%d.%m.%Y")
-
-        # Provenance / Üretim Kaynağı Rozeti
-        uretim_kaynagi = video_analizi.get("uretim_kaynagi", "rag_fallback")
-        if uretim_kaynagi == "ollama":
-            rozet = "<font color='#0284c7'><b>[Yerel Yapay Zeka (Ollama qwen3.5:4b)]</b></font>"
-        elif uretim_kaynagi == "gemini":
-            rozet = "<font color='#16a34a'><b>[Google Gemini API]</b></font>"
-        elif uretim_kaynagi == "transkript":
-            rozet = "Whisper transkripti"
-        elif uretim_kaynagi == "karma":
-            rozet = "Video ve bölüm analizi"
-        elif uretim_kaynagi == "rag_fallback":
-            rozet = "<font color='#d97706'><b>[Pedagojik RAG Bağlamı]</b></font>"
+        sinif_eslesmesi = re.fullmatch(r"\s*(\d+)\s*\.?\s*(?:s[ıi]n[ıi]f)?\s*", str(sinif_duzeyi).lower())
+        sinif = int(sinif_eslesmesi.group(1)) if sinif_eslesmesi else None
+        cerceveler = (
+            sorted(p for p in _CERCEVE_DIZINI.iterdir() if p.is_file() and p.suffix.lower() in {".jpeg", ".jpg", ".png"})
+            if sinif in range(1, 6) and _CERCEVE_DIZINI.is_dir()
+            else []
+        )
+        cerceve = next((p for p in cerceveler if p.name == cerceve_adi), None)
+        if cerceve is None and cerceveler:
+            cerceve = choice(cerceveler)
+        if cerceve and cerceve.stem == "4":
+            ust_kayma, alt_kayma = 0, 9
+        elif cerceve and cerceve.stem == "3":
+            ust_kayma, alt_kayma = 28, 9
+        elif cerceve and cerceve.stem == "7":
+            ust_kayma, alt_kayma = 28, 35
+        elif cerceve and cerceve.stem != "1":
+            ust_kayma, alt_kayma = 28, 52
         else:
-            rozet = "<font color='#64748b'><b>[MEB Müfredat Şablonu]</b></font>"
-
+            ust_kayma, alt_kayma = 0, 0
+        self._icerik_genisligi = A4[0] - 2 * _SABLON_YAN_BOSLUK - 12
         guvenli_ad = re.sub(r'[\\/*?:"<>| ]', '_', f"{ders_adi}_{unite_basligi}")[:35]
         if not cikis_dosya_adi:
-            cikis_dosya_adi = f"EduFrame_{guvenli_ad}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+            cikis_dosya_adi = f"LectraAI_{guvenli_ad}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
 
         pdf_hedef = self.cikti_dizini / cikis_dosya_adi
+        icerik_yolu = None
+        if icerigi_kaydet:
+            icerik_yolu = pdf_hedef.with_suffix(".icerik.json")
+            veri = {"surum": 1, "video_analizi": video_analizi, "sorular": sorular or [],
+                    "video_kaynak_bilgisi": video_kaynak_bilgisi,
+                    "cerceve_adi": cerceve.name if cerceve else None}
+            gecici_yol = None
+            try:
+                with NamedTemporaryFile(mode="w", encoding="utf-8", dir=icerik_yolu.parent, delete=False) as dosya:
+                    gecici_yol = Path(dosya.name)
+                    json.dump(veri, dosya, ensure_ascii=False, indent=2)
+                gecici_yol.replace(icerik_yolu)
+                print(f"[PDFGenerator] Yeniden basım kaydı: {icerik_yolu.resolve()}")
+            finally:
+                if gecici_yol is not None:
+                    gecici_yol.unlink(missing_ok=True)
         print(f"\n[PDFGenerator] Gerçek PDF Dosyası Basılıyor: {pdf_hedef.name}...")
 
         doc = SimpleDocTemplate(
             str(pdf_hedef.resolve()),
             pagesize=A4,
-            leftMargin=42,
-            rightMargin=42,
-            topMargin=45,
-            bottomMargin=45,
+            title=unite_basligi,
+            subject=self._temizle_dosya_yolu(video_kaynak_bilgisi),
+            leftMargin=_SABLON_YAN_BOSLUK,
+            rightMargin=_SABLON_YAN_BOSLUK,
+            topMargin=_SABLON_UST_BOSLUK + ust_kayma,
+            bottomMargin=_SABLON_ALT_BOSLUK + alt_kayma,
         )
 
         flowables = []
-
-        # ===================================================================
-        # SAYFA 1 - 10: HER GÖRSEL MATERYAL İÇİN BÖLÜM SAYFASI
-        # ===================================================================
-        for idx, bolum in enumerate(bolumler, start=1):
+        bekleyen_kavramlar = []
+        gorulen_kavramlar = set()
+        for idx, bolum in enumerate(bolumler, 1):
             if idx > 1:
                 flowables.append(PageBreak())
-
-            # Kapak Başlığı sadece 1. Sayfada görünür
+            kitap_ref = bolum.get("kitap_referansi")
+            flowables.append(_SayfaKaynagi(
+                f"MEB Ders Kitabı Doğrulaması: {kitap_ref}"
+                if kitap_ref and kitap_ref != "MEB Ders Kitabı Referansı" else ""
+            ))
             if idx == 1:
-                flowables.append(Paragraph(f"{ders_adi} – DERS NOTU FASİKÜLÜ", self.style_super_title))
-                flowables.append(Paragraph(escape(unite_basligi), self.style_sub_title))
-                meta_metni = (
-                    f"<b>Kademe:</b> {egitim_seviyesi} ({sinif_duzeyi}) &nbsp;&nbsp;|&nbsp;&nbsp; "
-                    f"<b>Tarih:</b> {tarih_str} &nbsp;&nbsp;|&nbsp;&nbsp; "
-                    f"<b>Kaynak:</b> {escape(temiz_video_kaynak[:45])} &nbsp;&nbsp;|&nbsp;&nbsp; {rozet}"
-                )
-                flowables.append(Paragraph(meta_metni, self.style_meta))
-                flowables.append(Spacer(1, 4))
-                flowables.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#2563eb"), spaceAfter=8))
-
-            b_baslik = bolum.get("bolum_basligi", f"Bölüm {idx} – Eğitim Materyali")
-            z_aralik = bolum.get("zaman_araligi_metni") or "00:00 – 00:00"
-
-            # Bölüm Başlığı & Zaman Aralığı Tablosu
-            baslik_tablosu = Table(
-                [[Paragraph(f"<b>{escape(b_baslik)}</b>", self.style_section_title),
-                  Paragraph(f"<b>Zaman Aralığı: {z_aralik}</b>", self.style_time_badge)]],
-                colWidths=[360, 151]
-            )
-            baslik_tablosu.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f1f5f9")),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-            ]))
-            flowables.append(baslik_tablosu)
-            flowables.append(Spacer(1, 5))
-
-            img = Image(bolum["ekran_goruntusu_yolu"], width=470, height=260, kind="proportional")
-            img.hAlign = "CENTER"
-            flowables.append(img)
-            flowables.append(Spacer(1, 5))
-
-            ham_transkript = bolum.get("transkript") or "Bu aralıkta konuşma bulunamadı."
-            konusma_zamani = bolum.get("konusma_zaman_araligi")
-            zaman_etiketi = f" {escape(konusma_zamani)}" if konusma_zamani else ""
-            t_para = Paragraph(escape(ham_transkript), self.style_transcript)
-            t_box = self._kutu_olustur(f"Orijinal Transkript{zaman_etiketi}", t_para, "#f8fafc", "#cbd5e1")
-            flowables.append(t_box)
-            flowables.append(Spacer(1, 5))
-
-            duzenli_anlatim = bolum.get("pedagojik_anlatim") or bolum.get("duzenlenmis_anlatim", "")
-            if duzenli_anlatim:
-                anlatim_html = escape(duzenli_anlatim).replace("\n", "<br/>")
-                if bolum.get("kitap_ek_bilgisi"):
-                    ek = escape(bolum["kitap_ek_bilgisi"])
-                    anlatim_html += f"<br/><br/><b>Kitaptan ek bilgi:</b> {ek}"
-                d_para = Paragraph(anlatim_html, self.style_pedagogical)
-                baslik = "Düzenlenmiş Ders Anlatımı"
-                if bolum.get("kaynak_tipi") == "transkript":
-                    baslik = "Ders Anlatımı (Transkript)"
-                d_box = self._kutu_olustur(baslik, d_para, "#eff6ff", "#93c5fd")
-                flowables.append(d_box)
-                flowables.append(Spacer(1, 5))
-
-            # Önemli Kavramlar Kutusu
-            kavramlar = bolum.get("onemli_kavramlar", [])
-            if kavramlar:
-                kavram_metinleri = []
-                for k in kavramlar:
-                    k_ad = k.get("kavram", "")
-                    k_aciklama = k.get("aciklama", "")
-                    kavram_metinleri.append(f"• <b>{escape(str(k_ad))}:</b> {escape(str(k_aciklama))}")
-                k_para = Paragraph("<br/>".join(kavram_metinleri), self.style_concept_body)
-                k_box = self._kutu_olustur("3. Bölümün Önemli Kavramları:", k_para, "#f0fdf4", "#86efac")
-                flowables.append(k_box)
-                flowables.append(Spacer(1, 4))
-
-            # Kitap Sayfa Referansı
-            kitap_ref = bolum.get("kitap_referansi", "")
-            if kitap_ref and kitap_ref != "MEB Ders Kitabı Referansı":
-                flowables.append(Paragraph(f"<b>MEB Ders Kitabı Doğrulaması:</b> <i>{escape(kitap_ref)}</i>", self.style_ref_tag))
-
-        # ===================================================================
-        # Bölüm verisi bir genel özet içeriyorsa ayrı sayfada göster.
-        genel_ozet = video_analizi.get("genel_ozet")
-        if genel_ozet:
-            flowables.append(PageBreak())
-            flowables.append(Paragraph("Dersin Genel Özeti", self.style_super_title))
-            ozet_para = Paragraph(escape(genel_ozet), self.style_general_summary)
-            flowables.append(self._kutu_olustur("Genel Ünite Özeti", ozet_para, "#f8fafc", "#94a3b8"))
-
-        # ===================================================================
-        # SAYFA 12 & 13: ÖĞRENCİ ETKİNLİK VE DEĞERLENDİRME FASİKÜLÜ (10 SORU)
-        # ===================================================================
-        if sorular and len(sorular) > 0:
-            # 1. BÖLÜM: Soru 1 – 5 (Sayfa 12)
-            flowables.append(PageBreak())
-            flowables.append(Paragraph("<b>ÖĞRENCİ ETKİNLİK VE DEĞERLENDİRME FASİKÜLÜ (1 / 2)</b>", self.style_super_title))
-            flowables.append(Paragraph(f"{ders_adi} &nbsp;|&nbsp; Konu: {unite_basligi} &nbsp;|&nbsp; Soru 1 – 5 &nbsp;|&nbsp; {rozet}", self.style_meta))
-            flowables.append(Spacer(1, 3))
-            flowables.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#059669"), spaceAfter=8))
-
-            sorular_part1 = sorular[:5]
-            for s in sorular_part1:
-                kart = self._modern_soru_karti(s)
-                flowables.append(kart)
-                flowables.append(Spacer(1, 5))
-
-            # 2. BÖLÜM: Soru 6 – 10 (Sayfa 13)
-            if len(sorular) > 5:
-                flowables.append(PageBreak())
-                flowables.append(Paragraph("<b>ÖĞRENCİ ETKİNLİK VE DEĞERLENDİRME FASİKÜLÜ (2 / 2)</b>", self.style_super_title))
-                flowables.append(Paragraph(f"{ders_adi} &nbsp;|&nbsp; Konu: {unite_basligi} &nbsp;|&nbsp; Soru 6 – 10 &nbsp;|&nbsp; {rozet}", self.style_meta))
-                flowables.append(Spacer(1, 3))
-                flowables.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#059669"), spaceAfter=8))
-
-                sorular_part2 = sorular[5:10]
-                for s in sorular_part2:
-                    kart = self._modern_soru_karti(s)
-                    flowables.append(kart)
-                    flowables.append(Spacer(1, 5))
-
-            # ===============================================================
-            # SAYFA 14: DETAYLI ÇÖZÜMLÜ CEVAP ANAHTARI & MEB KAYNAKÇA TABLOSU
-            # ===============================================================
-            flowables.append(PageBreak())
-            flowables.append(Paragraph("<b>DETAYLI ÇÖZÜMLÜ CEVAP ANAHTARI & KAZANIM EŞLEŞTİRME TABLOSU</b>", self.style_super_title))
-            flowables.append(Paragraph(f"{ders_adi} &nbsp;|&nbsp; {unite_basligi} &nbsp;|&nbsp; Doğrulanmış Kaynakça &nbsp;|&nbsp; {rozet}", self.style_meta))
-            flowables.append(Spacer(1, 3))
-            flowables.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#2563eb"), spaceAfter=8))
-
-            cevap_tablosu_verisi = [
-                [
-                    Paragraph("<b>Soru No</b>", self.style_table_header),
-                    Paragraph("<b>Öğrenilen Kavram</b>", self.style_table_header),
-                    Paragraph("<b>Doğru Yanıt</b>", self.style_table_header),
-                    Paragraph("<b>Ders Kitabı Referansı ve Çözüm Açıklaması</b>", self.style_table_header),
-                ]
-            ]
-
-            for s in sorular:
-                s_no = s.get("no", 1)
-                s_kavram = s.get("ilgili_kavram", "-")
-                s_cevap = s.get("dogru_cevap", "-")
-                s_aciklama = s.get("aciklama", "")
-                s_ref = s.get("kazanim_referansi", "")
-
-                if s_ref and s_ref not in ["Doğrulanmış ders kitabı kaynağı bulunamadı", "MEB Ders Kitabı"]:
-                    hucre_metni = f"<b>Kaynak:</b> {s_ref}<br/><b>Çözüm Gerekçesi:</b> {s_aciklama}"
-                else:
-                    hucre_metni = f"<font color='#dc2626'><i>Kaynak: Doğrulanmış ders kitabı kaynağı bulunamadı</i></font><br/><b>Çözüm Gerekçesi:</b> {s_aciklama}"
-
-                cevap_tablosu_verisi.append([
-                    Paragraph(f"<b>Soru {s_no}</b>", self.style_table_cell_bold),
-                    Paragraph(s_kavram, self.style_table_cell),
-                    Paragraph(f"<b>{s_cevap}</b>", self.style_table_cell_bold),
-                    Paragraph(hucre_metni, self.style_table_cell),
+                kademe = escape(str(video_analizi.get("egitim_seviyesi") or "İlkokul"))
+                kaynak = escape(self._temizle_dosya_yolu(video_kaynak_bilgisi))
+                tarih = datetime.now().strftime("%d.%m.%Y")
+                flowables.extend([
+                    Spacer(1, 0),
+                    Paragraph(escape(unite_basligi), self.style_doc_title),
+                    Spacer(1, 8),
+                    Paragraph(f"Kademe: {kademe} ({escape(str(sinif_duzeyi))}) | Tarih: {tarih} | Kaynak: {kaynak}",
+                              self.style_meta),
+                    Spacer(1, 5),
+                    HRFlowable(width="100%", thickness=0.85, color=colors.HexColor("#156082")),
+                    Spacer(1, 22),
                 ])
 
-            ans_table = Table(cevap_tablosu_verisi, colWidths=[42, 105, 48, 316])
-            ans_table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a8a")),
-                ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#cbd5e1")),
-                ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#ffffff"), colors.HexColor("#f8fafc")]),
-                ("TOPPADDING", (0, 0), (-1, -1), 1.5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            baslik = escape(str(bolum.get("bolum_basligi") or "Eğitim Materyali"))
+            zaman = escape(str(bolum.get("zaman_araligi_metni") or ""))
+            zaman_stili = self.style_first_time if idx == 1 else self.style_time
+            baslik_genisligi = self._icerik_genisligi + (12 if idx > 1 and cerceve else 0)
+            zaman_genisligi = 146 if idx == 1 else 135
+            baslik_kutusu = Table([[
+                Paragraph(f"{idx}. Bölüm - {baslik}", self.style_section_title),
+                Paragraph(f"Zaman Aralığı: {zaman}" if zaman else "", zaman_stili),
+            ]], colWidths=[baslik_genisligi - zaman_genisligi, zaman_genisligi], cornerRadii=[5] * 4)
+            baslik_kutusu.setStyle(TableStyle([
+                ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#196B24")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("LEFTPADDING", (1, 0), (1, -1), 1),
+                ("RIGHTPADDING", (1, 0), (1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 5 if idx == 1 else 10),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5 if idx == 1 else 10),
             ]))
-            flowables.append(ans_table)
-            flowables.append(Spacer(1, 4))
+            kare = Image(bolum["ekran_goruntusu_yolu"], width=self._icerik_genisligi - 2, height=219)
+            flowables.extend([
+                KeepTogether([baslik_kutusu, Spacer(1, 10 if idx == 1 else 14), kare]),
+                Spacer(1, 16 if idx == 1 else 19),
+            ])
 
-            # Dinamik ve Doğrulanmış Kaynaklar Bölümü (Statik Kaynakça Tamamen Kaldırıldı)
-            dinamik_kaynaklar = self._dinamik_kaynakca_derle(video_analizi, sorular)
-            kaynak_metni = "<br/>".join(dinamik_kaynaklar)
+            ham = escape(str(bolum.get("transkript") or "Bu aralıkta konuşma bulunamadı."))
+            konusma_zamani = bolum.get("konusma_zaman_araligi")
+            transkript_basligi = "Orijinal Transkript"
+            if konusma_zamani:
+                transkript_basligi += f" · {escape(str(konusma_zamani))}"
+            flowables.extend([
+                self._ders_kutusu(transkript_basligi, ham, "#F2F2F2", "#9A9A9A",
+                                  alt_bosluk=15 if idx == 1 else 22),
+                Spacer(1, 13 if idx == 1 else 19),
+            ])
 
-            kaynak_kutusu = [
-                [Paragraph("<b>Yararlanılan Resmi Müfredat Kaynakları (Doğrulanmış RAG Kaynakçası):</b>", self.style_box_label)],
-                [Paragraph(kaynak_metni, self.style_ref_tag)]
-            ]
-            k_table = Table(kaynak_kutusu, colWidths=[511])
-            k_table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f1f5f9")),
-                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
-                ("TOPPADDING", (0, 0), (-1, -1), 2),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-            ]))
-            flowables.append(k_table)
+            anlatim = bolum.get("pedagojik_anlatim") or bolum.get("duzenlenmis_anlatim")
+            if anlatim:
+                anlatim_basligi = ("Ders Anlatımı (Transkript)" if bolum.get("kaynak_tipi") == "transkript"
+                                   else "Düzenlenmiş Ders Anlatımı")
+                metin = escape(str(anlatim)).replace("\n", "<br/>")
+                if bolum.get("kitap_ek_bilgisi"):
+                    metin += "<br/><br/><b>Kitaptan ek bilgi:</b> " + escape(str(bolum["kitap_ek_bilgisi"]))
+                flowables.extend([
+                    self._ders_kutusu(anlatim_basligi, metin, "#D2E4F5", "#147CE5", alt_bosluk=20),
+                ])
+
+            kavram_metni = []
+            for kavram in bolum.get("onemli_kavramlar") or []:
+                if not isinstance(kavram, dict):
+                    continue
+                ad = str(kavram.get("kavram") or "").strip()
+                anahtar = kavram_anahtari(ad)
+                if not anahtar or anahtar in gorulen_kavramlar:
+                    continue
+                gorulen_kavramlar.add(anahtar)
+                aciklama = escape(str(kavram.get("aciklama") or ""))
+                kavram_metni.append((idx, f"- <b>{escape(ad)}:</b> {aciklama}"))
+            flowables.append(_KavramKutusu(
+                idx, kavram_metni, bekleyen_kavramlar, self.style_box_label, self.style_concept_body,
+                son_bolum=idx == len(bolumler),
+            ))
+
+        if video_analizi.get("genel_ozet"):
+            flowables.extend([
+                PageBreak(),
+                _SayfaKaynagi(),
+                Paragraph("Dersin Genel Özeti", self.style_super_title),
+                Spacer(1, 9),
+                Paragraph(escape(str(video_analizi["genel_ozet"])), self.style_pedagogical),
+            ])
+
+        if sorular:
+            soru_sayfalari = []
+            sayfa = []
+            kalan = doc.height - 72
+            for s in sorular:
+                kart = self._modern_soru_karti(s)
+                yukseklik = kart.wrap(self._icerik_genisligi, doc.height)[1] + 6
+                if sayfa and (len(sayfa) == 5 or yukseklik > kalan):
+                    soru_sayfalari.append(sayfa)
+                    sayfa = []
+                    kalan = doc.height - 72
+                sayfa.append((escape(str(s.get("no", 1))), kart))
+                kalan -= yukseklik
+            soru_sayfalari.append(sayfa)
+            for sayfa in soru_sayfalari:
+                flowables.extend([
+                    PageBreak(),
+                    _SayfaKaynagi(),
+                    Paragraph("Değerlendirme", self.style_super_title),
+                    Paragraph(f"Sorular {sayfa[0][0]}–{sayfa[-1][0]}", self.style_meta),
+                    Spacer(1, 10),
+                ])
+                for _, kart in sayfa:
+                    flowables.extend([kart, Spacer(1, 6)])
+
+            flowables.extend([PageBreak(), Paragraph("Çözümlü Cevap Anahtarı", self.style_super_title), Spacer(1, 9)])
+            for s in sorular:
+                no = escape(str(s.get("no", 1)))
+                kavram = escape(str(s.get("ilgili_kavram") or ""))
+                cevap = escape(str(s.get("dogru_cevap") or ""))
+                gerekce = escape(str(s.get("aciklama") or ""))
+                referans = s.get("kazanim_referansi") or "Doğrulanmış ders kitabı kaynağı bulunamadı."
+                if referans == "MEB Ders Kitabı":
+                    referans = "Doğrulanmış ders kitabı kaynağı bulunamadı."
+                flowables.append(KeepTogether([
+                    Paragraph(f"Soru {no} · {kavram}" if kavram else f"Soru {no}", self.style_box_label),
+                    Paragraph(f"<b>Doğru yanıt:</b> {cevap}<br/>{gerekce}", self.style_pedagogical),
+                    Paragraph(escape(str(referans)), self.style_ref_tag),
+                    Spacer(1, 7),
+                ]))
+
+            kaynaklar = self._dinamik_kaynakca_derle(video_analizi, sorular)
+            flowables.extend([Spacer(1, 8), Paragraph("MEB Kaynakçası", self.style_section_title)])
+            for kaynak in kaynaklar:
+                flowables.append(Paragraph(kaynak, self.style_ref_tag))
 
         # PDF'i derle
-        doc.build(flowables, canvasmaker=NumberedCanvas)
+        def sayfayi_hazirla(pdf_canvas, _doc):
+            pdf_canvas.cerceveyi_ciz()
+
+        doc.build(flowables, onFirstPage=sayfayi_hazirla, onLaterPages=sayfayi_hazirla,
+                  canvasmaker=partial(NumberedCanvas, cerceve=cerceve, ust_kayma=ust_kayma, alt_kayma=alt_kayma))
         print(f"[BAŞARILI] Kurumsal PDF Fasikülü üretildi: {pdf_hedef.resolve()}")
 
         return {
             "success": True,
             "pdf_path": str(pdf_hedef.resolve()),
+            "icerik_yolu": str(icerik_yolu.resolve()) if icerik_yolu else None,
             "html_path": None,
             "mesaj": "Gerçek kurumsal PDF ders notu başarıyla üretildi."
         }
+
+    def icerikten_yeniden_bas(self, icerik_yolu: Path) -> Dict[str, Any]:
+        """Kaydedilmiş ders içeriğini mevcut tasarımla yerelde basar."""
+        veri = json.loads(icerik_yolu.read_text(encoding="utf-8"))
+        if (not isinstance(veri, dict) or veri.get("surum") != 1
+                or not isinstance(veri.get("video_analizi"), dict)
+                or not isinstance(veri["video_analizi"].get("bolumler"), list)
+                or not veri["video_analizi"]["bolumler"]
+                or not isinstance(veri.get("sorular"), list)):
+            raise ValueError("Geçerli bir ders içeriği kaydı bulunamadı.")
+        ad = icerik_yolu.name.removesuffix(".icerik.json")
+        zaman = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        return self.pdf_olustur(
+            video_analizi=veri["video_analizi"], sorular=veri["sorular"],
+            video_kaynak_bilgisi=veri.get("video_kaynak_bilgisi") or "YouTube",
+            cikis_dosya_adi=f"{ad}_yeniden_{zaman}.pdf",
+            cerceve_adi=veri.get("cerceve_adi"),
+        )
 
 
 if __name__ == "__main__":

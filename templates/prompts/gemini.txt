@@ -14,7 +14,7 @@ MEB DERS KİTABI BAĞLAMI VE KAZANIMLARI:
 "{kitap_bg}"
 
 GÖREV:
-Verilen {ham_transkript} ve {kitap_bg} girdilerini kullanarak, aşağıdaki iki temel çıktı alanını birebir amaçlandığı biçimde üreten yapılandırılmış JSON nesnesi oluştur:
+Yukarıda verilen bölüm konuşmasını ve varsa MEB ders kitabı bağlamını kullanarak, aşağıdaki iki temel çıktı alanını birebir amaçlandığı biçimde üreten yapılandırılmış JSON nesnesi oluştur:
 1. "Orijinal Transkript" (orijinal_transkript): Konuşmadaki hitapları, cümle sırasını ve günlük/sınıf içi anlatım akışını korur; reklam, ürün, marka veya yayın tanıtımı içeren ifadeleri çıkarır; hatalı kelimeleri, bozuk ekleri, yazım yanlışlarını ve bağlamdan anlaşılan ses tanıma (ASR) hatalarını düzeltir; cümlenin yapısını ve konuşma doğallığını bozmadan devrik veya kulağa takılan ifadeleri daha düzgün yazar; "değil mi", "değil mi arkadaşlar" gibi tekrarlanan dolgu/onay ifadelerini kullanmaz ve bunların yerine bağlama uygun daha doğal ifadeler yerleştirir; kopuk veya anlamsız kalan ifadeleri kendi bağlamı içinde anlamlı ve akıcı biçimde düzenler. Yeni bilgi eklemez, özetlemez ve konuşma havasını silmez. Yalnızca anlamı tamamen belirsiz olan, bağlamdan kesin çıkarılamayan şüpheli sözcükleri olduğu gibi bırakır.
 2. "Düzenlenmiş Transkript" / Düzenlenmiş Konu Anlatımı (duzenlenmis_anlatim): Konuşmadaki hitapları, reklam/ürün ifadelerini ve sohbet havasını tamamen kaldırır; hatalı kelimeleri ve bozuk ekleri düzeltir; öğrencinin doğrudan bir ilkokul ders kitabında okuduğu nesnel, açıklayıcı ve sade bir konu anlatımına dönüştürür; soru çözümü varsa bağlamdan kopmadan gerekçeleriyle birlikte daha açıklayıcı biçimde sunar.
 
@@ -42,10 +42,10 @@ KATI PEDAGOJİK VE ÜSLUP KURALLARI:
    - Bölümün esas konusunu {sinif} ({egitim_seviyesi}) öğrencisinin düzeyine uygun, açık ve akıcı cümlelerle, en fazla 5 cümlede anlat.
    - Soru çözümü varsa konuşmadaki adımları ve gerekçeleri bağlamdan kopmadan, öğrencinin kolayca izleyebileceği açıklıkta kur.
    - Transkriptte yalnızca selamlama veya giriş geçişi varsa dolgu cümleleri üretme; yalnızca varsa mevcut konu bilgisini nesnel dille yaz.
-   - Konuşmada yer alan temel bilgileri ve somut örnekleri {kitap_bg} ile tutarlı biçimde koru; konu dışına çıkma.
+   - Konuşmada yer alan temel bilgileri ve somut örnekleri, varsa yukarıdaki MEB ders kitabı bağlamıyla tutarlı biçimde koru; konu dışına çıkma.
 
 4. HARMANLANMIŞ ÖRNEKLER (ornekler):
-   - Gerekirse en fazla iki kısa örnek ver. Yalnızca {ham_transkript} ve {kitap_bg} içeriğinden yararlan.
+   - Gerekirse en fazla iki kısa örnek ver. Yalnızca yukarıdaki bölüm konuşmasından ve varsa MEB ders kitabı bağlamından yararlan.
 
 5. ÖNEMLİ KAVRAMLAR VE AÇIKLAMALARI (onemli_kavramlar):
    - Bölümde açıklanan en fazla üç kavramı tanımla. Kavram yoksa boş liste [] döndür.

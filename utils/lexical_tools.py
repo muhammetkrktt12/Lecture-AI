@@ -20,6 +20,17 @@ def kelimelere_ayir(metin: str) -> List[str]:
     return re.findall(r"[a-zçğıöşü0-9]+", metin)
 
 
+def kavram_anahtari(metin: str) -> str:
+    """Kavram adlarının yaygın yazım ve çoğul biçimlerini karşılaştırır."""
+    kelimeler = kelimelere_ayir(metin)
+    if not kelimeler:
+        return ""
+    son = kelimeler[-1]
+    if len(son) >= 6 and son.endswith(("lar", "ler")):
+        kelimeler[-1] = son[:-3]
+    return " ".join(kelimeler).replace("araç ve gereç", "araç gereç")
+
+
 def ucgramlar(metin: str) -> Set[str]:
     """
     Türkçe ek ve kök farklılıklarına toleranslı karakter 3-gramları (trigrams) kümesi üretir.

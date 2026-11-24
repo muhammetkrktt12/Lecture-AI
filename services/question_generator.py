@@ -16,8 +16,18 @@ Temel Kurallar:
 import os
 import json
 import time
+import re
+from collections import Counter
+from functools import partial
+from pathlib import Path
 import requests
-from typing import List, Dict, Any, Optional
+from services.gemini_rate_limit import gemini_istegini_beklet, gemini_kota_hatasini_isle
+from services.gemini_usage import gemini_kullanimini_kaydet
+from services.gemini_analyzer import GeminiFasikulHatasi
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from services.rag_motoru import RAGMotoru
 
 try:
     from utils.lexical_tools import lexical_similarity
@@ -152,6 +162,9 @@ SADECE geçerli bir JSON nesnesi döndür."""
         payload: Dict[str, Any],
         timeout: Optional[int] = None,
         max_retries: Optional[int] = None,
+        *,
+        asama: str = "soru_uretimi",
+        yalniz_zaman_asiminda_tekrarla: bool = False,
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Google Gemini API'ye istek gönderir.
@@ -163,22 +176,36 @@ SADECE geçerli bir JSON nesnesi döndür."""
 
         timeout_sec = timeout or self.gemini_timeout
         retries = max_retries if max_retries is not None else self.gemini_max_retries
-        models_to_try = [self.model] + [m for m in self.fallback_models if m != self.model]
+        models_to_try = [self.model]
+        if asama != "soru_kaynak_dogrulama" and not yalniz_zaman_asiminda_tekrarla:
+            models_to_try.extend(m for m in self.fallback_models if m != self.model)
 
+        zaman_asimindan_sonra = False
         headers = {"x-goog-api-key": self.api_key, "Content-Type": "application/json"}
         for current_model in models_to_try:
             for attempt in range(retries + 1):
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent"
                 try:
+                    gemini_istegini_beklet(current_model)
                     res = requests.post(url, json=payload, headers=headers, timeout=timeout_sec)
+                    if res.status_code not in (200, 429):
+                        gemini_kullanimini_kaydet(current_model, asama, durum=str(res.status_code))
                     if res.status_code == 200:
-                        cands = res.json().get("candidates", [])
+                        yanit = res.json()
+                        gemini_kullanimini_kaydet(current_model, asama, yanit)
+                        cands = yanit.get("candidates", [])
                         if cands and "content" in cands[0]:
                             parts = cands[0]["content"].get("parts", [])
                             if parts and "text" in parts[0]:
                                 sorular = self._json_sorulari_ayristir(parts[0]["text"].strip())
                                 if sorular and len(sorular) >= 1:
+                                    if zaman_asimindan_sonra and asama == "soru_uretimi":
+                                        self._soru_bicimini_duzelt(sorular)
+                                        if not self._gemini_soru_seti_gecerli(sorular):
+                                            break
                                     return sorular
+                        if yalniz_zaman_asiminda_tekrarla:
+                            break
                     elif res.status_code == 503:
                         hata_mesaji = "Sunucu aşırı yoğunluk bildiriyor (503 Service Unavailable)"
                         try:
@@ -188,25 +215,32 @@ SADECE geçerli bir JSON nesnesi döndür."""
                         except Exception:
                             pass
                         print(f" -> [UYARI] Google Gemini API ({current_model}) 503 hatası: {hata_mesaji} (Deneme {attempt + 1}/{retries + 1})")
-                        if attempt < retries:
+                        if attempt < retries and not yalniz_zaman_asiminda_tekrarla:
                             backoff = 1.5 * (2 ** attempt)
                             time.sleep(backoff)
                             continue
+                        break
                     elif res.status_code == 429:
-                        print(f" -> [UYARI] Google Gemini API ({current_model}) günlük kota veya hız limiti (429) dolmuş.")
+                        kota = gemini_kota_hatasini_isle(current_model, res)
+                        gemini_kullanimini_kaydet(current_model, asama, durum="429", kota=kota)
+                        print(f" -> [UYARI] Google Gemini API ({current_model}) kullanım sınırı (429): {kota}")
                         break
                     else:
                         print(f" -> [UYARI] Google Gemini API ({current_model}) HTTP Hatası: {res.status_code}")
                         break
                 except requests.exceptions.Timeout:
+                    gemini_kullanimini_kaydet(current_model, asama, durum="zaman_asimi")
                     print(f" -> [UYARI] Google Gemini API ({current_model}) zaman aşımına uğradı ({timeout_sec}s, Deneme {attempt + 1}/{retries + 1}).")
                     if attempt < retries:
+                        zaman_asimindan_sonra = yalniz_zaman_asiminda_tekrarla
                         time.sleep(1.0)
                         continue
                 except Exception as e:
                     print(f" -> [UYARI] Google Gemini API soru üretim hatası ({current_model}): {e}")
                     break
 
+        if zaman_asimindan_sonra and asama == "soru_uretimi":
+            raise GeminiFasikulHatasi("Gemini soru üretimi zaman aşımına uğradı ve tek yeniden deneme başarısız oldu.")
         return None
 
     def _ollama_ile_soru_uret(self, istem: str, timeout: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
@@ -264,13 +298,23 @@ SADECE geçerli bir JSON nesnesi döndür."""
             print(f" -> [UYARI] Ollama soru üretimi beklenmedik hata: {e}")
         return None
 
-    def _gemini_ile_soru_uret(self, istem: str) -> Optional[List[Dict[str, Any]]]:
+    def _gemini_ile_soru_uret(self, istem: str, *, kaynak_dogrulama: bool = False) -> Optional[List[Dict[str, Any]]]:
         print(f"[QuestionGenerator - 2. Tercih (Fallback)] Google Gemini ({self.model}) ile soru üretiliyor...")
         payload = {
             "contents": [{"parts": [{"text": istem}]}],
             "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
         }
-        sorular = self._gemini_api_cagir(payload, timeout=self.gemini_timeout)
+        if kaynak_dogrulama:
+            payload["generationConfig"]["maxOutputTokens"] = 2048
+            if self.model == "gemini-3-flash-preview":
+                payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "LOW"}
+            return self._gemini_api_cagir(
+                payload, timeout=300, max_retries=1, yalniz_zaman_asiminda_tekrarla=True,
+                asama="soru_kaynak_dogrulama",
+            )
+        sorular = self._gemini_api_cagir(
+            payload, timeout=300, max_retries=1, yalniz_zaman_asiminda_tekrarla=True,
+        )
         if sorular and len(sorular) >= 1:
             print(f" -> [BAŞARILI] Google Gemini ({self.model}) {len(sorular)} özgün soru üretti.")
             return sorular
@@ -421,6 +465,230 @@ SADECE geçerli bir JSON nesnesi döndür."""
                 q["eslesen_chunk_id"] = None
 
         return sorular
+
+    @staticmethod
+    def _soru_bicimini_duzelt(sorular: List[Dict[str, Any]]) -> None:
+        """Modelin alan adlarını değil, eşdeğer seçenek gösterimlerini düzenler."""
+        for soru in sorular:
+            tip = soru.get("tip")
+            if not isinstance(tip, str):
+                continue
+            soru["tip"] = tip = re.sub(r"\s*[-–—]\s*", " - ", tip.strip())
+            if tip == "Çoktan Seçmeli":
+                secenekler = soru.get("secenekler")
+                if isinstance(secenekler, list) and len(secenekler) == 4 and all(isinstance(m, str) for m in secenekler):
+                    etiketler = [re.match(r"^([A-D])[.)]\s*", m.strip()) for m in secenekler]
+                    if not any(etiketler) or all(e and e[1] == h for e, h in zip(etiketler, "ABCD")):
+                        soru["secenekler"] = [f"{h}) " + re.sub(r"^[A-D][.)]\s*", "", m.strip())
+                                             for h, m in zip("ABCD", secenekler)]
+                cevap = soru.get("dogru_cevap")
+                if isinstance(cevap, str):
+                    harf = re.match(r"^\s*([A-D])(?:\s*$|[.)])", cevap.upper())
+                    if harf:
+                        soru["dogru_cevap"] = harf[1]
+            elif tip == "Boşluk Doldurma" and isinstance(soru.get("soru"), str):
+                soru["soru"] = re.sub(r"\.{4,}|…{2,}", "____", soru["soru"])
+
+    @staticmethod
+    def _gemini_soru_seti_gecerli(sorular: List[Dict[str, Any]]) -> bool:
+        if not sorular or len(sorular) != 10:
+            return False
+        kokler = set()
+        tipler = Counter()
+        for soru in sorular:
+            if not isinstance(soru, dict) or not all(
+                isinstance(soru.get(alan), str) and soru[alan].strip()
+                for alan in ("tip", "kategori", "ilgili_kavram", "soru", "dogru_cevap", "aciklama")
+            ):
+                return False
+            kok = " ".join(soru["soru"].casefold().split())
+            if kok in kokler:
+                return False
+            kokler.add(kok)
+            tip = soru["tip"]
+            tipler[tip] += 1
+            secenekler = soru.get("secenekler")
+            cevap = soru["dogru_cevap"].strip()
+            if tip == "Çoktan Seçmeli":
+                if not isinstance(secenekler, list) or len(secenekler) != 4 or cevap not in ("A", "B", "C", "D"):
+                    return False
+                if not all(isinstance(s, str) and s.startswith(f"{harf})") and s[2:].strip()
+                           for harf, s in zip("ABCD", secenekler)):
+                    return False
+                if len({" ".join(s[2:].casefold().split()) for s in secenekler}) != 4:
+                    return False
+            elif tip == "Doğru - Yanlış":
+                if secenekler != ["Doğru", "Yanlış"] or cevap not in secenekler:
+                    return False
+            elif tip == "Boşluk Doldurma":
+                if secenekler != [] or len(re.findall(r"_{3,}", kok)) != 1:
+                    return False
+        return tipler == {"Çoktan Seçmeli": 5, "Doğru - Yanlış": 3, "Boşluk Doldurma": 2}
+
+    def gemini_sorularini_uret(
+        self,
+        video_analizi: Dict[str, Any],
+        egitim_seviyesi: str,
+        rag_soru_ornekleri: List[Dict[str, Any]],
+        rag: "RAGMotoru",
+    ) -> List[Dict[str, Any]]:
+        """Dersin soru setini Gemini ile, gerektiğinde Ollama ile oluşturur."""
+        sinif = video_analizi.get("sinif_duzeyi")
+        ders = video_analizi.get("ders_adi")
+        konu = str(video_analizi.get("unite_basligi") or "")
+        alistirmalar = list(rag.konu_alistirmalarini_getir(konu, egitim_seviyesi, sinif, ders)) if konu and sinif and ders else []
+        veriler = {
+            "sinif": sinif, "egitim_seviyesi": egitim_seviyesi, "ders": ders,
+            "bolumler": [
+                {"baslik": b.get("bolum_basligi"), "anlatim": b.get("duzenlenmis_anlatim") or b.get("transkript"),
+                 "kavramlar": b.get("onemli_kavramlar", [])}
+                for b in video_analizi.get("bolumler", [])
+            ],
+            "bicim_ornekleri": [o["ornek_metin"][:750] for o in rag_soru_ornekleri if o.get("ornek_metin")],
+            "meb_alistirmalari": [
+                {"ornek_no": i, "metin": d.page_content[:1350]} for i, d in enumerate(alistirmalar, 1)
+            ],
+        }
+        sablon = Path(__file__).resolve().parents[1] / "templates" / "prompts" / "gemini-soru-uretimi.txt"
+        istem = sablon.read_text(encoding="utf-8-sig").format(veriler=json.dumps(veriler, ensure_ascii=False))
+        for saglayici, uret in (("gemini", self._gemini_ile_soru_uret), ("ollama", self._ollama_ile_soru_uret)):
+            if saglayici == "gemini" and not self._api_anahtari_var_mi():
+                continue
+            sorular = uret(istem)
+            self._soru_bicimini_duzelt(sorular or [])
+            if saglayici == "gemini" and sorular and not self._gemini_soru_seti_gecerli(sorular):
+                sorular = uret(istem + "\nÖnceki set biçim denetiminden geçmedi. Tam 5 çoktan seçmeli, 3 Doğru - Yanlış ve "
+                               "2 Boşluk Doldurma sorusu yaz. Seçenekleri A) biçiminde yaz, doğru yanıt yalnız harf olsun. "
+                               "Boşluğu ____ olarak, boşluk doldurma seçeneklerini [] olarak yaz. Her soru kökü farklı olsun.")
+                self._soru_bicimini_duzelt(sorular or [])
+            if self._gemini_soru_seti_gecerli(sorular):
+                for no, soru in enumerate(sorular, 1):
+                    soru.update(no=no, kaynak_tipi=saglayici, dogru_cevap=soru["dogru_cevap"].strip())
+                kaynak_uret = partial(uret, kaynak_dogrulama=True) if saglayici == "gemini" else uret
+                self._gemini_soru_kaynaklarini_dogrula(
+                    sorular, rag, kaynak_uret, egitim_seviyesi, sinif, ders, alistirmalar=alistirmalar,
+                    grup_boyutu=10 if saglayici == "gemini" else 2,
+                    kisa_adaylar=saglayici == "gemini",
+                )
+                return sorular
+            print(f"[Soru üretimi] {saglayici} geçerli bir 10 soruluk set döndürmedi.")
+        return []
+
+    @staticmethod
+    def _gemini_soru_kaynaklarini_dogrula(
+        sorular: List[Dict[str, Any]],
+        rag: "RAGMotoru",
+        uret: Callable[[str], Optional[List[Dict[str, Any]]]],
+        egitim_seviyesi: str,
+        sinif: Optional[str],
+        ders: Optional[str],
+        *,
+        alistirmalar: list,
+        grup_boyutu: int,
+        kisa_adaylar: bool = False,
+    ) -> None:
+        """Geniş aday aramasından yalnızca cevabı destekleyen birebir alıntıyı bağlar."""
+        adaylar = {}
+        veri = []
+        for soru in sorular:
+            soru.update(kazanim_referansi="Doğrulanmış ders kitabı kaynağı bulunamadı", rag_dogrulandi=False,
+                        kaynak_durumu="kaynak_dogrulanamadi", rag_kaynagi=None, eslesen_chunk_id=None)
+            if not sinif or not ders:
+                continue
+            cevap = soru["dogru_cevap"]
+            if soru["tip"] == "Çoktan Seçmeli":
+                cevap = soru["secenekler"]["ABCD".index(cevap)][2:].strip()
+            sorgu = f'{soru["ilgili_kavram"]}. {soru["soru"]} {cevap}. {soru["aciklama"]}'
+            docs = rag.seviye_filtreli_arama(sorgu, egitim_seviyesi, sinif=sinif, ders_adi=ders, k=8, max_mesafe=None)
+            parcalar = [d for d in docs if d.metadata.get("sinif") == sinif and d.metadata.get("ders_adi") == ders
+                        and d.metadata.get("kitap_adi") and d.metadata.get("has_printed_page")
+                        and d.metadata.get("printed_page") is not None and d.page_content.strip()]
+            secilen_ornek = soru.get("ornek_no")
+            ilgili_alistirmalar = sorted(alistirmalar, key=lambda d: lexical_similarity(sorgu, d.page_content), reverse=True)[:3] if lexical_similarity else []
+            if type(secilen_ornek) is int and 1 <= secilen_ornek <= len(alistirmalar):
+                ilgili_alistirmalar.insert(0, alistirmalar[secilen_ornek - 1])
+            alistirma_metinleri = {d.page_content for d in ilgili_alistirmalar}
+            tekil = {d.page_content: d for d in [*ilgili_alistirmalar, *parcalar]}
+            soru_adaylari = [
+                (d, d.page_content in alistirma_metinleri, d.page_content[:1350])
+                for d in tekil.values()
+            ]
+            if kisa_adaylar:
+                sirali = []
+                for doc, alistirma, metin in soru_adaylari:
+                    cumleler = [
+                        cumle.strip() for cumle in re.findall(r"[^.!?]+[.!?]", metin)
+                        if len(cumle.strip()) <= 430 and len(cumle.split()) >= 4
+                    ]
+                    if cumleler:
+                        puan, pasaj = max(
+                            ((lexical_similarity(sorgu, cumle) if lexical_similarity else 0, cumle)
+                             for cumle in cumleler),
+                            key=lambda aday: aday[0],
+                        )
+                        sirali.append((puan, alistirma, doc, pasaj))
+                sirali.sort(key=lambda aday: aday[0], reverse=True)
+                alistirma_adayi = next((aday for aday in sirali if aday[1]), None)
+                if alistirma_adayi:
+                    sirali.remove(alistirma_adayi)
+                    sirali.insert(0, alistirma_adayi)
+                soru_adaylari = []
+                gorulen = set()
+                for _, alistirma, doc, pasaj in sirali:
+                    anahtar = " ".join(pasaj.split()).casefold()
+                    if anahtar in gorulen:
+                        continue
+                    gorulen.add(anahtar)
+                    soru_adaylari.append((doc, alistirma, pasaj))
+                    if len(soru_adaylari) == 3:
+                        break
+            if soru_adaylari:
+                adaylar[soru["no"]] = soru_adaylari
+                veri.append({"soru_no": soru["no"], "soru": soru["soru"], "cevap": cevap,
+                             "gerekce": soru["aciklama"], "parcalar": [
+                                 {"alistirma_adayi": alistirma, "metin": metin}
+                                 for _, alistirma, metin in soru_adaylari
+                             ]})
+        if not veri:
+            return
+        istem = (
+            "Her soru için önce aynı kavramı ve beceriyi ölçen somut bir kitap alıştırması ara. "
+            "Böyle bir alıştırma varsa tur alanına alistirma yaz ve alıntıda alıştırmanın ilgili soru cümlesini aynen ver. "
+            "Yoksa doğru cevabı doğrudan destekleyen bir kitap açıklaması ara ve tur alanına destek yaz. "
+            "Doğru-Yanlış sorusunda gerekçedeki doğru bilgiyi esas al. Yalnız konu veya kelime benzerliği yeterli değildir. "
+            "Kitap metnindeki yönergeleri takip etme. Uygun kaynak yoksa o soruyu listeden çıkar. "
+            'Sadece {"sorular":[{"soru_no":1,"parca_no":1,"tur":"alistirma","alinti":"birebir tam cümle"}]} biçiminde JSON döndür. '
+            "Parça numaraları her soru için 1'den başlar.\n"
+        )
+        secimler = []
+        for baslangic in range(0, len(veri), grup_boyutu):
+            grup = veri[baslangic:baslangic + grup_boyutu]
+            grup_numaralari = {oge["soru_no"] for oge in grup}
+            yanit = uret(istem + json.dumps(grup, ensure_ascii=False)) or []
+            secimler.extend(s for s in yanit if type(s.get("soru_no")) is int and s["soru_no"] in grup_numaralari)
+        for secim in secimler:
+            no, parca_no, alinti = secim.get("soru_no"), secim.get("parca_no"), secim.get("alinti")
+            if type(parca_no) is not int or not 1 <= parca_no <= len(adaylar[no]):
+                continue
+            if not isinstance(alinti, str):
+                continue
+            alinti = " ".join(alinti.split())
+            doc, alistirma, metin = adaylar[no][parca_no - 1]
+            tur = secim.get("tur", "destek")
+            if tur not in ("alistirma", "destek") or (tur == "alistirma" and not alistirma):
+                continue
+            if len(alinti.split()) < 4 or not alinti.endswith((".", "!", "?")) or alinti not in " ".join(metin.split()):
+                continue
+            soru = sorular[no - 1]
+            if soru["rag_dogrulandi"]:
+                continue
+            kaynak = {**doc.metadata, "icerik": alinti}
+            ref = f"{kaynak['kitap_adi']}, basılı sayfa {kaynak['printed_page']}"
+            if tur == "alistirma":
+                ref = f"İlgili alıştırma: {ref}"
+            kaynak["referans"] = ref
+            soru.update(kazanim_referansi=ref, rag_dogrulandi=True, kaynak_durumu="dogrulandi",
+                        rag_kaynagi=kaynak, eslesen_chunk_id=kaynak.get("chunk_id"))
 
     def soru_uret(
         self,
