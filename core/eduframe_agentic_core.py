@@ -374,7 +374,8 @@ def pdf_rapor_dugumu(state: EduFrameState) -> Dict[str, Any]:
     print("\n[LangGraph: pdf_rapor] ReportLab ile gerçek kurumsal PDF fasikülü basılıyor...")
     video_analizi = state.get("video_analizi") or {}
     sorular = state.get("sorular") or []
-    generator = PDFGenerator()
+    cikti_dizini = state.get("pdf_cikti_dizini")
+    generator = PDFGenerator(cikti_dizini=Path(cikti_dizini)) if cikti_dizini else PDFGenerator()
     sonuc = generator.pdf_olustur(
         video_analizi=video_analizi,
         sorular=sorular,
@@ -469,6 +470,7 @@ class EduFrameAgenticCore:
         gemini_modeli: Optional[str] = None,
         ollama_yedek_onayi_gerekli: bool = False,
         ilerleme: Optional[Callable[[str], None]] = None,
+        pdf_cikti_dizini: Optional[str] = None,
     ) -> EduFrameState:
         """
         Grafı verilen girdilerle baştan sona işletir ve nihai durumu döner.
@@ -483,6 +485,7 @@ class EduFrameAgenticCore:
             "ollama_modeli": ollama_modeli,
             "gemini_modeli": gemini_modeli,
             "ollama_yedek_onayi_gerekli": ollama_yedek_onayi_gerekli,
+            "pdf_cikti_dizini": pdf_cikti_dizini,
         }
         with gemini_kullanim_oturumu():
             if ilerleme is None:

@@ -1,4 +1,4 @@
-# EduFrame AI (AI Video Lesson Analyzer) - Gerçek Bağımlılık Listesi
+# LectraAI - Python bağımlılıkları
 # Kurulum için: pip install -r requirements.txt
 
 # Temel Yapay Zeka, Ajan ve Vektör Çerçeveleri
@@ -6,23 +6,24 @@ langchain-core>=0.3.0
 langchain-chroma>=0.2.0
 langchain-ollama>=0.2.0
 langchain-text-splitters>=0.3.0
-langgraph>=0.2.0
+langgraph>=1.0.0
 chromadb>=0.5.0
+tokenizers>=0.20.0
 
 # Yerel Konuşma Tanıma (Speech-to-Text)
-faster-whisper>=1.0.0
+faster-whisper>=1.2.1
+# Windows'ta bu Whisper sürümüyle doğrulanan PyAV serisi.
+av>=18.1,<19
 
-# Multimodal AI ve API Servisleri
-google-generativeai>=0.8.0
+# Yapılandırma ve HTTP istemcisi (Gemini REST API ve Ollama)
 python-dotenv>=1.0.0
-mcp>=1.0.0
 requests>=2.31.0
-pydantic>=2.0.0
 
 # Video İndirme ve Medya İşleme
-yt-dlp>=2024.08.01
+yt-dlp[default]>=2026.10.26
 Pillow>=10.0.0
 numpy>=1.26.0
+opencv-contrib-python>=4.11.0
 mediapipe>=0.10.0
 
 # Belge Ayrıştırma ve Pedagojik PDF Üretimi

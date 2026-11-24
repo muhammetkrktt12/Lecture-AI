@@ -39,6 +39,7 @@ class EduFrameState(TypedDict, total=False):
     sorular: Optional[List[Dict[str, Any]]] # Üretilen değerlendirme soruları
     cikti_pdf_yolu: Optional[str]           # WeasyPrint ile üretilen PDF dosya yolu
     icerik_kaydi_yolu: Optional[str]
+    pdf_cikti_dizini: Optional[str]
     cikti_html_yolu: Optional[str]          # İnteraktif HTML dosya yolu
 
     # --- Nihai Çıktılar ve Hata Yönetimi ---
