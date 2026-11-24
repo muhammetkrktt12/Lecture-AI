@@ -18,6 +18,9 @@ class EduFrameState(TypedDict, total=False):
     egitim_seviyesi: str                    # 'İlkokul' | 'Ortaokul' | 'Lise' | 'Üniversite'
     sinif_duzeyi: Optional[str]             # Arayüzden seçilen sınıf
     anlatim_modeli: str                     # 'ollama' | 'gemini'
+    ollama_modeli: Optional[str]
+    gemini_modeli: Optional[str]
+    ollama_yedek_onayi_gerekli: bool
     soru_eklensin_mi: bool                  # Değerlendirme soruları oluşturulsun mu?
 
     # --- Orkestrasyon Kararı ---
@@ -35,6 +38,7 @@ class EduFrameState(TypedDict, total=False):
     # --- Soru ve Raporlama ---
     sorular: Optional[List[Dict[str, Any]]] # Üretilen değerlendirme soruları
     cikti_pdf_yolu: Optional[str]           # WeasyPrint ile üretilen PDF dosya yolu
+    icerik_kaydi_yolu: Optional[str]
     cikti_html_yolu: Optional[str]          # İnteraktif HTML dosya yolu
 
     # --- Nihai Çıktılar ve Hata Yönetimi ---

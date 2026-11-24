@@ -19,11 +19,13 @@ import time
 import re
 from collections import Counter
 from functools import partial
+from random import choice, shuffle
 from pathlib import Path
 import requests
 from services.gemini_rate_limit import gemini_istegini_beklet, gemini_kota_hatasini_isle
 from services.gemini_usage import gemini_kullanimini_kaydet
 from services.gemini_analyzer import GeminiFasikulHatasi
+from utils.lexical_tools import kelimelere_ayir
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
@@ -96,6 +98,10 @@ class QuestionGenerator:
 
     def _api_anahtari_var_mi(self) -> bool:
         return bool(self.api_key and len(self.api_key.strip()) > 10 and not self.api_key.startswith("AIzaSyDummy"))
+
+    @property
+    def ollama_devre_disi(self) -> bool:
+        return self._ollama_devre_disi
 
     @staticmethod
     def _json_sorulari_ayristir(metin: str) -> Optional[List[Dict[str, Any]]]:
@@ -243,7 +249,10 @@ SADECE geçerli bir JSON nesnesi döndür."""
             raise GeminiFasikulHatasi("Gemini soru üretimi zaman aşımına uğradı ve tek yeniden deneme başarısız oldu.")
         return None
 
-    def _ollama_ile_soru_uret(self, istem: str, timeout: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
+    def _ollama_ile_soru_uret(
+        self, istem: str, timeout: Optional[int] = None, *, num_ctx: Optional[int] = None,
+        yanit_semasi: Optional[Dict[str, Any]] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
         if self._ollama_devre_disi:
             return None
 
@@ -254,7 +263,7 @@ SADECE geçerli bir JSON nesnesi döndür."""
                 "model": self.ollama_model,
                 "prompt": istem,
                 "stream": False,
-                "format": "json",
+                "format": yanit_semasi or "json",
                 "think": False,
                 "options": {
                     "num_thread": 16,
@@ -262,6 +271,8 @@ SADECE geçerli bir JSON nesnesi döndür."""
                     "temperature": 0.2
                 }
             }
+            if num_ctx is not None:
+                payload["options"]["num_ctx"] = num_ctx
             res = requests.post(f"{self.ollama_url.rstrip('/')}/api/generate", json=payload, timeout=tout)
             if res.status_code == 200:
                 data = res.json()
@@ -490,40 +501,290 @@ SADECE geçerli bir JSON nesnesi döndür."""
                 soru["soru"] = re.sub(r"\.{4,}|…{2,}", "____", soru["soru"])
 
     @staticmethod
-    def _gemini_soru_seti_gecerli(sorular: List[Dict[str, Any]]) -> bool:
-        if not sorular or len(sorular) != 10:
+    def _soru_bicimi_gecerli(soru: Dict[str, Any]) -> bool:
+        if not isinstance(soru, dict) or not all(
+            isinstance(soru.get(alan), str) and soru[alan].strip()
+            for alan in ("tip", "kategori", "ilgili_kavram", "soru", "dogru_cevap", "aciklama")
+        ):
             return False
+        tip = soru["tip"]
+        secenekler = soru.get("secenekler")
+        cevap = soru["dogru_cevap"].strip()
+        if tip == "Çoktan Seçmeli":
+            return (
+                isinstance(secenekler, list) and len(secenekler) == 4 and cevap in ("A", "B", "C", "D")
+                and all(isinstance(s, str) and s.startswith(f"{harf})") and s[2:].strip()
+                        for harf, s in zip("ABCD", secenekler))
+                and len({" ".join(s[2:].casefold().split()) for s in secenekler}) == 4
+            )
+        if tip == "Doğru - Yanlış":
+            return secenekler == ["Doğru", "Yanlış"] and cevap in secenekler
+        if tip == "Boşluk Doldurma":
+            return secenekler == [] and len(re.findall(r"_{3,}", soru["soru"])) == 1
+        return False
+
+    @classmethod
+    def _gemini_soru_seti_gecerli(cls, sorular: List[Dict[str, Any]]) -> bool:
+        if not sorular or len(sorular) != 10 or not all(cls._soru_bicimi_gecerli(q) for q in sorular):
+            return False
+        kokler = {" ".join(q["soru"].casefold().split()) for q in sorular}
+        return len(kokler) == 10 and Counter(q["tip"] for q in sorular) == {
+            "Çoktan Seçmeli": 5, "Doğru - Yanlış": 3, "Boşluk Doldurma": 2,
+        }
+
+    def ollama_fasikul_sorularini_uret(
+        self, video_analizi: Dict[str, Any], egitim_seviyesi: str,
+        rag_soru_ornekleri: List[Dict[str, Any]], rag: "RAGMotoru",
+    ) -> List[Dict[str, Any]]:
+        """Yerel fasikül sorularını MEB bağlamıyla üretir ve ikinci geçişte denetler."""
+        sinif = video_analizi.get("sinif_duzeyi")
+        ders = video_analizi.get("ders_adi")
+        konu = video_analizi.get("unite_basligi") or ""
+        bolumler = [
+            {"baslik": b.get("bolum_basligi"), "anlatim": b.get("duzenlenmis_anlatim") or b.get("transkript"),
+             "ogretmen_konusmasi": b.get("transkript"), "kavramlar": b.get("onemli_kavramlar", [])}
+            for b in video_analizi.get("bolumler", [])
+        ]
+        alistirmalar = []
+        kitap_metinleri = {}
+        if sinif and ders:
+            if konu:
+                alistirmalar = list(rag.konu_alistirmalarini_getir(str(konu), egitim_seviyesi, sinif, ders))
+            alistirma_metinleri = {d.page_content for d in alistirmalar}
+            for b in bolumler:
+                sorgu = " ".join(str(b[alan] or "") for alan in ("baslik", "anlatim")).strip()
+                if not sorgu:
+                    continue
+                for belge in rag.seviye_filtreli_arama(
+                    sorgu, egitim_seviyesi, sinif=sinif, ders_adi=ders, k=8, max_mesafe=None,
+                ):
+                    if belge.page_content.strip() and belge.page_content not in alistirma_metinleri:
+                        kitap_metinleri[belge.page_content] = None
+        veriler = {
+            "sinif": sinif, "egitim_seviyesi": egitim_seviyesi, "ders": ders, "bolumler": bolumler,
+            "bicim_ornekleri": [o["ornek_metin"] for o in rag_soru_ornekleri if o.get("ornek_metin")],
+            "meb_alistirmalari": [
+                {"ornek_no": i, "metin": d.page_content} for i, d in enumerate(alistirmalar, 1)
+            ],
+            "meb_konu_metinleri": list(kitap_metinleri),
+        }
+        sablon = Path(__file__).resolve().parents[1] / "templates" / "prompts" / "ollama-soru-uretimi.txt"
+        istem = sablon.read_text(encoding="utf-8-sig") + "\n\nDERS VERİLERİ\n" + json.dumps(veriler, ensure_ascii=False)
+        sorular = self._ollama_ile_soru_uret(
+            istem, num_ctx=32768, yanit_semasi=self._ollama_sorular_semalari(10),
+        ) or []
+        self._ollama_soru_bicimini_duzelt(sorular)
+        sorular = self._ollama_sorularini_denetle(sorular, bolumler, sinif)
+        return self._ollama_fasikul_sorularini_tamamla(
+            sorular, rag, egitim_seviyesi, sinif, ders, alistirmalar,
+        )
+
+    @staticmethod
+    def _ollama_sorular_semalari(
+        sayi: int, *, denetim: bool = False, soru_numaralari=(), tipler=(),
+    ) -> Dict[str, Any]:
+        if denetim:
+            alanlar = {
+                "soru_no": {"type": "integer"},
+                "uygun": {"type": "boolean"},
+                "gerekce": {"type": "string"},
+                "bulunan_cevap": {"type": "string"},
+                "alinti": {"type": "string"},
+            }
+        else:
+            alanlar = {
+                ad: {"type": "string"}
+                for ad in ("kategori", "ilgili_kavram", "soru", "dogru_cevap", "aciklama")
+            }
+            alanlar.update({
+                "tip": {"enum": ["Çoktan Seçmeli", "Doğru - Yanlış", "Boşluk Doldurma"]},
+                "secenekler": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+                "ornek_no": {"type": "integer"},
+                "soru_no": {"type": "integer"},
+            })
+            if tipler:
+                alanlar["tip"]["enum"] = list(dict.fromkeys(tipler))
+        if soru_numaralari:
+            alanlar["soru_no"]["enum"] = list(soru_numaralari)
+        return {
+            "type": "object", "required": ["sorular"],
+            "properties": {"sorular": {
+                "type": "array", "minItems": sayi, "maxItems": sayi,
+                "items": {"type": "object", "properties": alanlar, "required": list(alanlar)},
+            }},
+        }
+
+    def _ollama_sorularini_denetle(self, sorular, bolumler, sinif) -> List[Dict[str, Any]]:
+        konusma = [
+            b["ogretmen_konusmasi"] for b in bolumler if b.get("ogretmen_konusmasi")
+        ]
+        if not konusma:
+            return []
+        normal_konusmalar = [" ".join(metin.split()) for metin in konusma]
+        baglam = json.dumps({"sinif": sinif, "ogretmen_konusmalari": konusma}, ensure_ascii=False)
+        uygunlar = {}
         kokler = set()
-        tipler = Counter()
+        tip_sayilari = Counter()
+        tip_sinirlari = {"Çoktan Seçmeli": 5, "Doğru - Yanlış": 3, "Boşluk Doldurma": 2}
+        for baslangic in range(0, len(sorular), 5):
+            denetlenecek = {
+                i + 1: sorular[i] for i in range(baslangic, min(baslangic + 5, len(sorular)))
+                if self._soru_bicimi_gecerli(sorular[i])
+            }
+            for deneme in range(3):
+                if not denetlenecek:
+                    break
+                veri = [
+                    {"soru_no": no, **{alan: q[alan] for alan in ("tip", "soru", "secenekler")}}
+                    for no, q in denetlenecek.items()
+                ]
+                denetim = self._ollama_ile_soru_uret(
+                    "Her soruyu öğretmen konuşmasına göre bağımsız çöz. bulunan_cevap alanına çoktan seçmeli için harf, "
+                    "doğru-yanlış için Doğru veya Yanlış, boşluk doldurma için boşluğa gelecek ifadeyi yaz. "
+                    "alinti alanına cevabın tamamını destekleyen kesintisiz metni konuşmadan noktalamasıyla aynen kopyala. "
+                    "Anlamca eşdeğer ifade destek sayılır. Alıntıda kelimeleri değiştirme. Sorunun doğru cevabı "
+                    "kökünden tahmin edilebiliyorsa, birden çok cevap savunulabiliyorsa, gerekli görsel eksikse "
+                    "veya alıntı cevabı desteklemiyorsa uygun=false yaz. Gerekçeyi bir kısa cümlede ver.\n"
+                    + baglam + "\n" + json.dumps(veri, ensure_ascii=False),
+                    num_ctx=16384, yanit_semasi=self._ollama_sorular_semalari(
+                        len(veri), denetim=True, soru_numaralari=denetlenecek,
+                    ),
+                ) or []
+                karar_sayilari = Counter(q.get("soru_no") for q in denetim if type(q.get("soru_no")) is int)
+                kararlar = {q["soru_no"]: q for q in denetim if type(q.get("soru_no")) is int
+                            and karar_sayilari[q["soru_no"]] == 1}
+                sorunlar = {}
+                for no, soru in denetlenecek.items():
+                    karar = kararlar.get(no, {})
+                    sorun = self._ollama_soru_denetim_sorunu(soru, karar, normal_konusmalar)
+                    kok = " ".join(kelimelere_ayir(soru["soru"]))
+                    tip = soru["tip"]
+                    if kok in kokler:
+                        sorun = "Bu soru kökü daha önce kullanıldı."
+                    elif tip_sayilari[tip] >= tip_sinirlari[tip]:
+                        continue
+                    if sorun:
+                        sorunlar[no] = sorun
+                    else:
+                        uygunlar[no] = soru
+                        kokler.add(kok)
+                        tip_sayilari[tip] += 1
+                hatalilar = {no: denetlenecek[no] for no in sorunlar}
+                if not hatalilar:
+                    break
+                print(f"[Ollama soru denetimi] Yeniden yazılması gereken sorular: {list(hatalilar)}")
+                if deneme == 2:
+                    break
+                onarim = self._ollama_ile_soru_uret(
+                    "Yalnızca aşağıdaki sorunlu soruları öğretmen konuşmasına göre yeniden yaz. "
+                    "Soru numarasını (soru_no) ve türünü koru. Tek anlamlı soru, doğru cevap ve sade gerekçe ver. "
+                    "Önceki soru veya kavram hatalı ya da belirsizse aynı düşünceyi başka kelimelerle tekrarlama. "
+                    "Öğretmenin açıkça açıkladığı farklı ve somut bir noktadan yeni soru yaz. "
+                    "Çoktan seçmeli şıkları A)–D) biçiminde yaz, doğru cevap harf olsun. "
+                    "Doğru - Yanlış seçenekleri Doğru ve Yanlış olsun. Boşluk doldurmada ____ ve boş seçenek listesi kullan. "
+                    "Doğru - Yanlış maddesini bir yargı cümlesi olarak yaz. Soru kökü cevabı ele vermesin ve "
+                    "verilmeyen bir görsele veya tabloya gönderme yapmasın. "
+                    "Kaynak ekleme, ornek_no=0 yaz.\n" + baglam + "\n" + json.dumps([
+                        {"soru_no": no, "onceki_soru": soru, "sorun": sorunlar[no]}
+                        for no, soru in hatalilar.items()
+                    ], ensure_ascii=False),
+                    num_ctx=16384, yanit_semasi=self._ollama_sorular_semalari(
+                        len(hatalilar), soru_numaralari=hatalilar,
+                        tipler=[q["tip"] for q in hatalilar.values()],
+                    ),
+                ) or []
+                self._ollama_soru_bicimini_duzelt(onarim)
+                yeniler = {q["soru_no"]: q for q in onarim if type(q.get("soru_no")) is int
+                           and q["soru_no"] in hatalilar and self._soru_bicimi_gecerli(q)
+                           and q["tip"] == hatalilar[q["soru_no"]]["tip"]}
+                denetlenecek = yeniler
+        return [uygunlar[no] for no in sorted(uygunlar)]
+
+    @staticmethod
+    def _ollama_soru_koku_sorunu(soru) -> str:
+        metin = soru["soru"].strip()
+        tip = soru["tip"]
+        kok = kelimelere_ayir(metin)
+        cevap = soru["dogru_cevap"].strip()
+        if tip == "Doğru - Yanlış" and (
+            "?" in metin or (kok and kok[-1] in {"mı", "mi", "mu", "mü"})
+        ):
+            return "Doğru-yanlış maddesi bir yargı olmalı."
+        if tip == "Çoktan Seçmeli" and re.search(
+            r"\b(?:yer almaz|değildir|söylenemez|kullanılmaz|çalışmaz|yapılmamalıdır)\b",
+            metin, re.IGNORECASE,
+        ):
+            return "Çoktan seçmeli soru kökünü olumlu bir cümleyle kur."
+        if re.search(r"\b(?:görselde\w*|resimde\w*|şekildeki|tablodaki|yukarıdaki|gösterilen)\b", metin, re.IGNORECASE):
+            return "Soru, yanında bulunmayan bir görsele veya başka bir içeriğe gönderme yapıyor."
+        if tip == "Çoktan Seçmeli" and cevap in {"A", "B", "C", "D"}:
+            secenekler = [kelimelere_ayir(s[2:]) for s in soru["secenekler"]]
+            i = "ABCD".index(cevap)
+            dogru = " ".join(secenekler[i])
+            if dogru and f" {dogru} " in f" {' '.join(kok)} ":
+                return "Doğru seçenek soru kökünde aynen geçiyor."
+            if "ortak" in kok:
+                diger = {w[:7] for j, secenek in enumerate(secenekler) if j != i for w in secenek if len(w) >= 7}
+                kokler = {w[:7] for w in kok if len(w) >= 7}
+                ayirt_edici = {w[:7] for w in secenekler[i] if len(w) >= 7} - diger
+                if ayirt_edici & kokler:
+                    return "Ortak özellik sorusunun kökü doğru seçenekteki ayırt edici kelimeyi ele veriyor."
+        return ""
+
+    @classmethod
+    def _ollama_soru_denetim_sorunu(cls, soru, karar, konusmalar) -> str:
+        if sorun := cls._ollama_soru_koku_sorunu(soru):
+            return sorun
+        cevap = soru["dogru_cevap"].strip()
+        if karar.get("uygun") is not True:
+            return karar.get("gerekce") or "9B soruyu uygun bulmadı."
+        bulunan = karar.get("bulunan_cevap", "")
+        if kelimelere_ayir(bulunan) != kelimelere_ayir(cevap):
+            return "Bağımsız çözümde bulunan cevap üretimdeki cevapla uyuşmuyor."
+        alinti = " ".join(karar.get("alinti", "").split())
+        if len(kelimelere_ayir(alinti)) < 3 or not any(alinti in metin for metin in konusmalar):
+            return "Cevabı destekleyen birebir konuşma alıntısı bulunamadı."
+        return ""
+
+    @classmethod
+    def _ollama_soru_bicimini_duzelt(cls, sorular: List[Dict[str, Any]]) -> None:
+        turler = {
+            "coktan secmeli": "Çoktan Seçmeli",
+            "dogru yanlis": "Doğru - Yanlış",
+            "bosluk doldurma": "Boşluk Doldurma",
+            "bosluk dolurma": "Boşluk Doldurma",
+        }
+        harfler = str.maketrans("çğıöşü", "cgiosu")
         for soru in sorular:
-            if not isinstance(soru, dict) or not all(
-                isinstance(soru.get(alan), str) and soru[alan].strip()
-                for alan in ("tip", "kategori", "ilgili_kavram", "soru", "dogru_cevap", "aciklama")
-            ):
-                return False
-            kok = " ".join(soru["soru"].casefold().split())
-            if kok in kokler:
-                return False
-            kokler.add(kok)
-            tip = soru["tip"]
-            tipler[tip] += 1
-            secenekler = soru.get("secenekler")
-            cevap = soru["dogru_cevap"].strip()
-            if tip == "Çoktan Seçmeli":
-                if not isinstance(secenekler, list) or len(secenekler) != 4 or cevap not in ("A", "B", "C", "D"):
-                    return False
-                if not all(isinstance(s, str) and s.startswith(f"{harf})") and s[2:].strip()
-                           for harf, s in zip("ABCD", secenekler)):
-                    return False
-                if len({" ".join(s[2:].casefold().split()) for s in secenekler}) != 4:
-                    return False
-            elif tip == "Doğru - Yanlış":
-                if secenekler != ["Doğru", "Yanlış"] or cevap not in secenekler:
-                    return False
-            elif tip == "Boşluk Doldurma":
-                if secenekler != [] or len(re.findall(r"_{3,}", kok)) != 1:
-                    return False
-        return tipler == {"Çoktan Seçmeli": 5, "Doğru - Yanlış": 3, "Boşluk Doldurma": 2}
+            tip = soru.get("tip")
+            if isinstance(tip, str):
+                anahtar = " ".join(kelimelere_ayir(tip)).translate(harfler)
+                soru["tip"] = turler.get(anahtar, tip)
+        cls._soru_bicimini_duzelt(sorular)
+
+    def _ollama_fasikul_sorularini_tamamla(
+        self, sorular: List[Dict[str, Any]], rag: "RAGMotoru", egitim_seviyesi: str,
+        sinif: Optional[str], ders: Optional[str], alistirmalar: list,
+    ) -> List[Dict[str, Any]]:
+        if not sorular:
+            return []
+
+        cevap_konumlari = [0, 1, 2, 3, choice(range(4))]
+        shuffle(cevap_konumlari)
+        for no, soru in enumerate(sorular, 1):
+            soru.update(no=no, kaynak_tipi="ollama", dogru_cevap=soru["dogru_cevap"].strip())
+            if soru["tip"] == "Çoktan Seçmeli":
+                secenekler = [metin[2:].strip() for metin in soru["secenekler"]]
+                dogru = "ABCD".index(soru["dogru_cevap"])
+                hedef = cevap_konumlari.pop()
+                secenekler[dogru], secenekler[hedef] = secenekler[hedef], secenekler[dogru]
+                soru["secenekler"] = [f"{harf}) {metin}" for harf, metin in zip("ABCD", secenekler)]
+                soru["dogru_cevap"] = "ABCD"[hedef]
+        self._gemini_soru_kaynaklarini_dogrula(
+            sorular, rag, self._ollama_ile_soru_uret, egitim_seviyesi, sinif, ders, alistirmalar=alistirmalar,
+            grup_boyutu=5, kisa_adaylar=True, ollama_baglamli_dogrulama=True,
+        )
+        return sorular
 
     def gemini_sorularini_uret(
         self,
@@ -575,6 +836,20 @@ SADECE geçerli bir JSON nesnesi döndür."""
         return []
 
     @staticmethod
+    def _ollama_alintida_bilgi_var_mi(alinti: str) -> bool:
+        """Soru kökü ve etkinlik yönergesinden oluşan alıntıları eler."""
+        for cumle in re.findall(r"[^.!?]+[.!?]", alinti):
+            kelimeler = kelimelere_ayir(cumle)
+            if len(kelimeler) < 4 or cumle.endswith("?"):
+                continue
+            if re.search(r"(?:alım|elim|ınız|iniz|unuz|ünüz|inizdir)$", kelimeler[-1]) or (
+                kelimeler[-1] in {"yazın", "okuyun", "inceleyin", "seçin", "işaretleyin", "cevaplayın"}
+            ):
+                continue
+            return True
+        return False
+
+    @staticmethod
     def _gemini_soru_kaynaklarini_dogrula(
         sorular: List[Dict[str, Any]],
         rag: "RAGMotoru",
@@ -586,6 +861,7 @@ SADECE geçerli bir JSON nesnesi döndür."""
         alistirmalar: list,
         grup_boyutu: int,
         kisa_adaylar: bool = False,
+        ollama_baglamli_dogrulama: bool = False,
     ) -> None:
         """Geniş aday aramasından yalnızca cevabı destekleyen birebir alıntıyı bağlar."""
         adaylar = {}
@@ -616,17 +892,22 @@ SADECE geçerli bir JSON nesnesi döndür."""
             if kisa_adaylar:
                 sirali = []
                 for doc, alistirma, metin in soru_adaylari:
-                    cumleler = [
-                        cumle.strip() for cumle in re.findall(r"[^.!?]+[.!?]", metin)
-                        if len(cumle.strip()) <= 430 and len(cumle.split()) >= 4
+                    eslesmeler = list(re.finditer(r"[^.!?]+[.!?]", metin))
+                    puanli = [
+                        (lexical_similarity(sorgu, eslesme[0]) if lexical_similarity else 0, i)
+                        for i, eslesme in enumerate(eslesmeler)
+                        if len(eslesme[0].strip()) <= 430 and len(eslesme[0].split()) >= 4
                     ]
-                    if cumleler:
-                        puan, pasaj = max(
-                            ((lexical_similarity(sorgu, cumle) if lexical_similarity else 0, cumle)
-                             for cumle in cumleler),
-                            key=lambda aday: aday[0],
-                        )
-                        sirali.append((puan, alistirma, doc, pasaj))
+                    if not puanli:
+                        continue
+                    puan, i = max(puanli, key=lambda aday: aday[0])
+                    pasaj = eslesmeler[i][0].strip()
+                    if ollama_baglamli_dogrulama:
+                        komsulu = metin[eslesmeler[max(i - 1, 0)].start():
+                                         eslesmeler[min(i + 1, len(eslesmeler) - 1)].end()].strip()
+                        if len(komsulu) <= 900:
+                            pasaj = komsulu
+                    sirali.append((puan, alistirma, doc, pasaj))
                 sirali.sort(key=lambda aday: aday[0], reverse=True)
                 alistirma_adayi = next((aday for aday in sirali if aday[1]), None)
                 if alistirma_adayi:
@@ -660,12 +941,19 @@ SADECE geçerli bir JSON nesnesi döndür."""
             'Sadece {"sorular":[{"soru_no":1,"parca_no":1,"tur":"alistirma","alinti":"birebir tam cümle"}]} biçiminde JSON döndür. '
             "Parça numaraları her soru için 1'den başlar.\n"
         )
+        if ollama_baglamli_dogrulama:
+            istem += (
+                "Verilen komşu cümleleri birlikte incele. Gerekirse birbirine bitişik birden fazla cümleyi "
+                "aynen alıntıla. Cevapla eş anlamlı ifadeleri kabul et. Yalnızca ilişkili bir cihaz veya genel "
+                "konu geçiyorsa kaynağı seçme. Alıştırma seçiyorsan alıntı, aynı cevabı bulmaya da elverişli olmalı.\n"
+            )
         secimler = []
         for baslangic in range(0, len(veri), grup_boyutu):
             grup = veri[baslangic:baslangic + grup_boyutu]
             grup_numaralari = {oge["soru_no"] for oge in grup}
             yanit = uret(istem + json.dumps(grup, ensure_ascii=False)) or []
             secimler.extend(s for s in yanit if type(s.get("soru_no")) is int and s["soru_no"] in grup_numaralari)
+        gecerli_secimler = []
         for secim in secimler:
             no, parca_no, alinti = secim.get("soru_no"), secim.get("parca_no"), secim.get("alinti")
             if type(parca_no) is not int or not 1 <= parca_no <= len(adaylar[no]):
@@ -679,6 +967,34 @@ SADECE geçerli bir JSON nesnesi döndür."""
                 continue
             if len(alinti.split()) < 4 or not alinti.endswith((".", "!", "?")) or alinti not in " ".join(metin.split()):
                 continue
+            if ollama_baglamli_dogrulama and not QuestionGenerator._ollama_alintida_bilgi_var_mi(alinti):
+                continue
+            gecerli_secimler.append((no, doc, tur, alinti))
+
+        if ollama_baglamli_dogrulama and gecerli_secimler:
+            soru_verileri = {oge["soru_no"]: oge for oge in veri}
+            kontrol = [
+                {"secim_no": i, "soru": soru_verileri[no]["soru"], "cevap": soru_verileri[no]["cevap"],
+                 "gerekce": soru_verileri[no]["gerekce"], "alinti": alinti}
+                for i, (no, _, _, alinti) in enumerate(gecerli_secimler, 1)
+            ]
+            onaylar = set()
+            for baslangic in range(0, len(kontrol), grup_boyutu):
+                grup = kontrol[baslangic:baslangic + grup_boyutu]
+                sonuc = uret(
+                    "Her alıntı, doğru cevabı veya doğru-yanlış gerekçesindeki doğru önermeyi tek başına destekliyor mu? "
+                    "Eş anlam ve doğrudan çıkarım kabul edilir. Aynı konudan söz etmek yeterli değildir. "
+                    "Alıntıdaki bir bilginin doğru olması, soruya verilen cevabı kanıtlamıyorsa reddet. "
+                    'Yalnızca {"sorular":[{"secim_no":1,"destekliyor":true}]} biçiminde JSON döndür.\n'
+                    + json.dumps(grup, ensure_ascii=False)
+                ) or []
+                numaralar = {oge["secim_no"] for oge in grup}
+                onaylar.update(oge["secim_no"] for oge in sonuc
+                               if type(oge.get("secim_no")) is int and oge["secim_no"] in numaralar
+                               and oge.get("destekliyor") is True)
+            gecerli_secimler = [secim for i, secim in enumerate(gecerli_secimler, 1) if i in onaylar]
+
+        for no, doc, tur, alinti in gecerli_secimler:
             soru = sorular[no - 1]
             if soru["rag_dogrulandi"]:
                 continue

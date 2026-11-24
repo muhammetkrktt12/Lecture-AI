@@ -22,7 +22,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from typing import Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional
 from langgraph.graph import StateGraph, END
 
 from core.state import EduFrameState
@@ -33,7 +33,7 @@ from services.gemini_analyzer import GeminiAnalyzer, GeminiFasikulHatasi
 from services.gemini_usage import gemini_kullanim_oturumu
 from services.question_generator import QuestionGenerator
 from services.pdf_generator import EksikDersKaresiHatasi, PDFGenerator
-from config import DEFAULT_SEVIYE, FRAMES_DIR, TEMP_DIR
+from config import DEFAULT_SEVIYE, FRAMES_DIR, GEMINI_MODEL, OLLAMA_MODEL, TEMP_DIR
 from utils.lexical_tools import kavram_anahtari, kelimelere_ayir, lexical_similarity
 
 # Kalite ve Doğrulama Araçları (utils.lexical_tools öncelikli)
@@ -49,6 +49,9 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # DÜĞÜM FONKSİYONLARI (GRAPH NODES)
 # ---------------------------------------------------------------------------
+
+class OllamaFasikulHatasi(RuntimeError):
+    """Ollama çalıştırması kullanıcı tarafından yeniden denenebilir."""
 
 def planla_dugumu(state: EduFrameState) -> Dict[str, Any]:
     """
@@ -205,8 +208,13 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
     seviye = analiz_sonucu["egitim_seviyesi"]
     sinif = analiz_sonucu["sinif_duzeyi"]
     ders = analiz_sonucu["ders_adi"]
-    analyzer = GeminiAnalyzer()
     gemini_secili = state.get("anlatim_modeli") == "gemini"
+    onay_gerekli = not gemini_secili and state.get("ollama_yedek_onayi_gerekli", False)
+    analyzer = GeminiAnalyzer(
+        model=state.get("gemini_modeli") or GEMINI_MODEL,
+        ollama_model=state.get("ollama_modeli") or OLLAMA_MODEL,
+        api_key="" if onay_gerekli else None,
+    )
     if gemini_secili and not analyzer._api_anahtari_var_mi():
         raise GeminiFasikulHatasi("Gemini ile PDF üretmek için GEMINI_API_KEY ayarlanmalıdır.")
     rag = RAGMotoru()
@@ -231,6 +239,8 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
                 bolum=bolum, rag_sonuc={}, sinif=sinif, ders=ders,
                 egitim_seviyesi=seviye, kitap_eki_ayri=True, transkript_icerigini_koru=True,
             )
+            if onay_gerekli and analyzer.ollama_devre_disi:
+                raise OllamaFasikulHatasi("Ollama bölüm anlatımı sırasında yanıt vermeyi durdurdu.")
 
         yeni_kavramlar = []
         for kavram in bolum.get("onemli_kavramlar") or []:
@@ -253,6 +263,8 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
         elif "kare_zamani" not in bolum:
             bolum["kare_zamani"] = float(30 * b_no)
 
+    if onay_gerekli and not any(b.get("kaynak_tipi") == "ollama" for b in bolumler):
+        raise OllamaFasikulHatasi("Ollama kullanılabilir bir ders anlatımı üretemedi.")
     kitap_eki_sec = analyzer.gemini_kitap_ek_bilgisi_sec if gemini_secili else analyzer.ollama_kitap_ek_bilgisi_sec
     kitap_ekleri = []
     for bolum in bolumler:
@@ -275,6 +287,8 @@ def gemini_analiz_dugumu(state: EduFrameState) -> Dict[str, Any]:
             and belge.metadata.get("printed_page") is not None
         ]
         destek = kitap_eki_sec(anlatim, adaylar, sinif)
+        if onay_gerekli and analyzer.ollama_devre_disi:
+            raise OllamaFasikulHatasi("Ollama kitap desteği hazırlanırken yanıt vermeyi durdurdu.")
         if destek:
             kitap_ekleri.append((bolum, destek))
 
@@ -332,8 +346,11 @@ def soru_uret_dugumu(state: EduFrameState) -> Dict[str, Any]:
     seviye = state.get("egitim_seviyesi", DEFAULT_SEVIYE)
     rag_soru_ornekleri = state.get("rag_soru_ornekleri") or []
 
-    qgen = QuestionGenerator()
     gemini_secili = state.get("anlatim_modeli") == "gemini"
+    qgen = QuestionGenerator(
+        model=state.get("gemini_modeli") or GEMINI_MODEL,
+        ollama_model=state.get("ollama_modeli") or OLLAMA_MODEL,
+    )
     if gemini_secili:
         rag = RAGMotoru()
         sorular = qgen.gemini_sorularini_uret(video_analizi, seviye, rag_soru_ornekleri, rag)
@@ -341,12 +358,13 @@ def soru_uret_dugumu(state: EduFrameState) -> Dict[str, Any]:
             raise GeminiFasikulHatasi("Gemini ve Ollama geçerli bir 10 soruluk değerlendirme seti üretemedi.")
         return {"sorular": sorular}
 
-    sorular = qgen.soru_uret(
-        video_analizi=video_analizi,
-        egitim_seviyesi=seviye,
-        rag_soru_ornekleri=rag_soru_ornekleri,
-        soru_sayisi=10,
+    sorular = qgen.ollama_fasikul_sorularini_uret(
+        video_analizi, seviye, rag_soru_ornekleri, RAGMotoru(),
     )
+    if state.get("ollama_yedek_onayi_gerekli") and qgen.ollama_devre_disi and not sorular:
+        raise OllamaFasikulHatasi("Ollama değerlendirme soruları sırasında yanıt vermeyi durdurdu.")
+    if len(sorular) < 10:
+        print(f"[Ollama] Denetimden geçen {len(sorular)}/10 soru ile PDF üretimine devam ediliyor.")
 
     return {"sorular": sorular}
 
@@ -366,6 +384,7 @@ def pdf_rapor_dugumu(state: EduFrameState) -> Dict[str, Any]:
 
     return {
         "cikti_pdf_yolu": sonuc.get("pdf_path"),
+        "icerik_kaydi_yolu": sonuc.get("icerik_yolu"),
         "cikti_html_yolu": sonuc.get("html_path"),
         "yanit_metni": f"Ders notu PDF'iniz başarıyla oluşturuldu: {sonuc.get('pdf_path')}"
     }
@@ -445,6 +464,11 @@ class EduFrameAgenticCore:
         soru_eklensin_mi: bool = False,
         sinif_duzeyi: Optional[str] = None,
         anlatim_modeli: str = "ollama",
+        *,
+        ollama_modeli: Optional[str] = None,
+        gemini_modeli: Optional[str] = None,
+        ollama_yedek_onayi_gerekli: bool = False,
+        ilerleme: Optional[Callable[[str], None]] = None,
     ) -> EduFrameState:
         """
         Grafı verilen girdilerle baştan sona işletir ve nihai durumu döner.
@@ -456,9 +480,21 @@ class EduFrameAgenticCore:
             "soru_eklensin_mi": soru_eklensin_mi,
             "sinif_duzeyi": sinif_duzeyi,
             "anlatim_modeli": anlatim_modeli,
+            "ollama_modeli": ollama_modeli,
+            "gemini_modeli": gemini_modeli,
+            "ollama_yedek_onayi_gerekli": ollama_yedek_onayi_gerekli,
         }
         with gemini_kullanim_oturumu():
-            return self.graph.invoke(baslangic_state)
+            if ilerleme is None:
+                return self.graph.invoke(baslangic_state)
+            sonuc = baslangic_state
+            for kip, veri in self.graph.stream(baslangic_state, stream_mode=["updates", "values"]):
+                if kip == "values":
+                    sonuc = veri
+                elif kip == "updates":
+                    for dugum in veri:
+                        ilerleme(dugum)
+            return sonuc
 
 
 # --- KÖK DİZİN DOĞRUDAN TESTİ ---

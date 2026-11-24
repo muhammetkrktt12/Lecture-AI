@@ -332,6 +332,15 @@ class PDFGenerator:
             return temiz.replace("_", " ").strip()
         return metin_str
 
+    @staticmethod
+    def _ollama_ders_basligini_duzenle(baslik: str) -> str:
+        baslik = re.sub(r"\b(?:arac|araç)\s+(?:ve\s+)?(?:gerecler|gereçler)\b",
+                        "Araç ve Gereçler", baslik, flags=re.IGNORECASE)
+        return re.sub(r"(?<!\w)\w+", lambda m: (
+            m[0] if m[0] == "ve" or not m[0].islower()
+            else m[0][0].replace("i", "İ").upper() + m[0][1:]
+        ), baslik)
+
     def _dinamik_kaynakca_derle(
         self,
         video_analizi: Dict[str, Any],
@@ -539,6 +548,9 @@ class PDFGenerator:
         ders_adi = (video_analizi.get("ders_adi") or "FEN BİLİMLERİ").upper()
         ham_unite = video_analizi.get("unite_basligi") or "Elektrikli Araçlar ve Elektrik Kaynakları"
         unite_basligi = self._temizle_dosya_yolu(ham_unite)
+        bolum_kaynaklari = {b.get("kaynak_tipi") for b in bolumler}
+        if "ollama" in bolum_kaynaklari and "gemini" not in bolum_kaynaklari:
+            unite_basligi = self._ollama_ders_basligini_duzenle(unite_basligi)
         sinif_duzeyi = video_analizi.get("sinif_duzeyi", "3. Sınıf")
         sinif_eslesmesi = re.fullmatch(r"\s*(\d+)\s*\.?\s*(?:s[ıi]n[ıi]f)?\s*", str(sinif_duzeyi).lower())
         sinif = int(sinif_eslesmesi.group(1)) if sinif_eslesmesi else None
@@ -755,7 +767,7 @@ class PDFGenerator:
             "mesaj": "Gerçek kurumsal PDF ders notu başarıyla üretildi."
         }
 
-    def icerikten_yeniden_bas(self, icerik_yolu: Path) -> Dict[str, Any]:
+    def icerikten_yeniden_bas(self, icerik_yolu: Path, *, cerceve_adi: Optional[str] = None) -> Dict[str, Any]:
         """Kaydedilmiş ders içeriğini mevcut tasarımla yerelde basar."""
         veri = json.loads(icerik_yolu.read_text(encoding="utf-8"))
         if (not isinstance(veri, dict) or veri.get("surum") != 1
@@ -770,7 +782,7 @@ class PDFGenerator:
             video_analizi=veri["video_analizi"], sorular=veri["sorular"],
             video_kaynak_bilgisi=veri.get("video_kaynak_bilgisi") or "YouTube",
             cikis_dosya_adi=f"{ad}_yeniden_{zaman}.pdf",
-            cerceve_adi=veri.get("cerceve_adi"),
+            cerceve_adi=cerceve_adi or veri.get("cerceve_adi"),
         )
 
 

@@ -1,307 +1,333 @@
-"""
-EduFrame AI - AI Video Lesson Analyzer (app.py)
------------------------------------------------
-Ekran Değişimlerine ve Görsel Materyallere Dayalı Otonom Ders Notu ve PDF Fasikül Üreticisi
-"""
+"""LectraAI ders fasikülü çalışma alanı."""
 
-import os
-import sys
+import re
 from hashlib import sha256
-from html import escape
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from tempfile import NamedTemporaryFile
 
-ROOT_DIR = Path(__file__).resolve().parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-try:
-    import streamlit as st
-except ImportError:
-    print("Streamlit modülü henüz kurulu değil. 'pip install streamlit' komutunu çalıştırın.")
-    sys.exit(1)
+import requests
+import streamlit as st
 
 from config import (
-    EGITIM_SEVIYELERI,
-    DEFAULT_SEVIYE,
-    GEMINI_API_KEY,
-    REFERENCE_BOOKS_DIR,
-    OUTPUTS_DIR,
-    VIDEOS_DIR,
+    EGITIM_SEVIYELERI, EMBED_MODEL, GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_MODEL, OLLAMA_URL, VIDEOS_DIR,
 )
-from core.eduframe_agentic_core import EduFrameAgenticCore
-from services.pdf_generator import EksikDersKaresiHatasi
+from core.eduframe_agentic_core import EduFrameAgenticCore, OllamaFasikulHatasi
 from services.gemini_analyzer import GeminiFasikulHatasi
-from services.rag_motoru import RAGMotoru
-from services.video_processor import VideoProcessor
-
-# --- SAYFA YAPILANDIRMASI ---
-st.set_page_config(
-    page_title="EduFrame AI - Görsel Materyal Odaklı Ders Fasikülü",
-    page_icon="🎓",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.markdown("""
-<style>
-    .main-title {
-        font-size: 2.3rem;
-        font-weight: 800;
-        color: #1e3a8a;
-        margin-bottom: 0.1rem;
-    }
-    .sub-title {
-        font-size: 1.05rem;
-        color: #475569;
-        margin-bottom: 1.2rem;
-    }
-    .time-badge {
-        background-color: #0284c7;
-        color: #ffffff;
-        padding: 3px 10px;
-        border-radius: 12px;
-        font-weight: 700;
-        font-size: 0.85rem;
-    }
-    .box-transcript {
-        background-color: #f8fafc;
-        border-left: 4px solid #94a3b8;
-        padding: 10px;
-        border-radius: 6px;
-        font-style: italic;
-        color: #334155;
-        margin-bottom: 8px;
-    }
-    .box-pedagogical {
-        background-color: #eff6ff;
-        border-left: 4px solid #2563eb;
-        padding: 10px;
-        border-radius: 6px;
-        color: #1e3a8a;
-        font-weight: 500;
-        margin-bottom: 8px;
-    }
-    .box-concept {
-        background-color: #f0fdf4;
-        border-left: 4px solid #16a34a;
-        padding: 10px;
-        border-radius: 6px;
-        color: #14532d;
-    }
-</style>
-""", unsafe_allow_html=True)
+from services.pdf_generator import EksikDersKaresiHatasi, PDFGenerator
 
 
-# --- YAN MENÜ ---
-with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/3429/3429440.png", width=65)
-    st.markdown("### ⚙️ Müfredat ve Kademe")
+ROOT = Path(__file__).resolve().parent
+SINIFLAR = {
+    "İlkokul": range(1, 5),
+    "Ortaokul": range(5, 9),
+    "Lise": range(9, 13),
+}
+GEMINI_SECENEKLERI = {
+    "gemini-3-flash-preview": "Gemini 3 Flash",
+    "gemini-3.8-flash": "Gemini 3.8 Flash",
+    "gemini-3.5-flash-lite": "Gemini 3.5 Flash Lite",
+}
+VARSAYILAN_GEMINI = GEMINI_MODEL if GEMINI_MODEL in GEMINI_SECENEKLERI else next(iter(GEMINI_SECENEKLERI))
+ASAMALAR = {
+    "planla": (0.12, "Video kaynağı hazırlanıyor"),
+    "video_indir": (0.30, "Konuşma ve ekran görüntüleri çıkarılıyor"),
+    "ffmpeg_kare": (0.53, "MEB kitaplığı taranıyor"),
+    "rag_baglam": (0.64, "Ders anlatımı hazırlanıyor"),
+    "soru_uret": (0.92, "PDF sayfaları hazırlanıyor"),
+}
 
-    secilen_seviye = st.selectbox(
-        "🎓 Hedef Eğitim Seviyesi:",
-        options=EGITIM_SEVIYELERI,
-        index=0,
-    )
-
-    sinif_secenekleri = {
-        "İlkokul": ["3. Sınıf", "4. Sınıf"],
-        "Ortaokul": ["5. Sınıf", "6. Sınıf", "7. Sınıf", "8. Sınıf"],
-        "Lise": ["9. Sınıf", "10. Sınıf", "11. Sınıf", "12. Sınıf"],
-        "Üniversite": ["Genel Lisans"]
-    }
-
-    secilen_sinif = st.selectbox(
-        "🏫 Sınıf / Kademe:",
-        options=sinif_secenekleri.get(secilen_seviye, ["Genel"])
-    )
-
-    soru_tercihi = st.checkbox(
-        "📝 Değerlendirme ve Test Soruları Ekle",
-        value=True,
-        help="Kademenin ders kitabı soru formatına uygun sorular ve cevap anahtarı üretir."
-    )
-
-    st.markdown("---")
-    st.markdown("### 📚 Küratörlü Kitaplık")
-    try:
-        rag = RAGMotoru()
-        durum = rag.mevcut_veritabani_durumu()
-        st.write(f"**Vektör İndeks:** `{durum.get('toplam_parca', 0)} parça`")
-        st.caption("3-gram Türkçe Rerank ve Gemma Tokenizer aktif.")
-    except Exception:
-        pass
-
-    vp = VideoProcessor()
-    if vp.ffmpeg_yolu:
-        st.success("✅ FFmpeg Algılandı (Gyan.dev)")
-    else:
-        st.warning("⚠️ FFmpeg Bulunamadı")
-
-
-# --- ANA EKRAN ---
-st.markdown('<div class="main-title">EduFrame AI – Görsel Materyal Odaklı Ders Fasikülü</div>', unsafe_allow_html=True)
+st.set_page_config(page_title="LectraAI", page_icon="📘", layout="wide", initial_sidebar_state="collapsed")
 st.markdown(
-    '<div class="sub-title">'
-    'Videoyu ekrandaki görsel materyal değişimlerine (slayt, şema, tahta) göre bölümler; '
-    'her materyalin ekranda kaldığı süre boyunca yapılan konuşmaları ders kitabı (RAG) ile sentezleyerek kurumsal PDF ders notu oluşturur.'
-    '</div>',
-    unsafe_allow_html=True
+    """
+    <style>
+    .block-container { max-width: 1120px; padding-top: 4.25rem; padding-bottom: 3rem; }
+    .lectra-hero {
+        position: relative; isolation: isolate; overflow: hidden;
+        padding: clamp(1.45rem, 4vw, 2.8rem); border: 1px solid #d2e1d8;
+        border-radius: 24px; background: linear-gradient(112deg, #fff 34%, #e7f2e8 100%);
+    }
+    .lectra-hero::after {
+        content: ""; position: absolute; z-index: -1; inset: 0 0 0 48%;
+        background-image: radial-gradient(#87ad98 1px, transparent 1px);
+        background-size: 15px 15px; opacity: .37;
+        mask-image: linear-gradient(90deg, transparent, #000);
+    }
+    .lectra-brand {
+        display: inline-flex; align-items: center; gap: .55rem;
+        color: #225c4b; font-size: .92rem; font-weight: 750; letter-spacing: .025em;
+    }
+    .lectra-brand::before {
+        content: ""; width: 1.2rem; height: 1.2rem; border-radius: 6px;
+        background: linear-gradient(135deg, #126158 48%, #b4d7b3 49%);
+    }
+    .lectra-hero h1 {
+        color: #14382f; font-size: clamp(2rem, 5vw, 3.4rem); line-height: 1.09;
+        font-weight: 750; letter-spacing: -.055em; padding: .72rem 0 .62rem;
+    }
+    .lectra-hero p { color: #456458; margin: 0; font-size: 1.04rem; }
+    [data-testid="stTabs"] [role="tablist"] { gap: .95rem; }
+    [data-testid="stTabs"] [role="tab"] { padding-inline: .4rem; font-weight: 650; }
+    .st-key-video_kaynagi, .st-key-fasikul_ayarlari, .st-key-fasikul_sonucu, .st-key-yedek_karari_kutusu {
+        background: #fff; border-radius: 18px;
+    }
+    [data-testid="stFileUploaderDropzone"] {
+        background: #f3f8f3; border: 1px dashed #80a596; border-radius: 12px;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] { border-radius: 18px; }
+    [data-testid="stButton"] button[kind="primary"],
+    [data-testid="stDownloadButton"] button[kind="primary"] { min-height: 3rem; font-weight: 700; }
+    @media (max-width: 600px) {
+        .block-container { padding-top: 3.4rem; }
+        .lectra-hero { border-radius: 18px; }
+    }
+    </style>
+    <header class="lectra-hero">
+      <div class="lectra-brand">LectraAI</div>
+      <h1>Ders Fasikülü Oluştur</h1>
+      <p>Ders videolarından görsel destekli hızlıca ders notu çıkar.</p>
+    </header>
+    """,
+    unsafe_allow_html=True,
 )
 
-tab_video, tab_asistan = st.tabs(["🎥 Görsel Materyal Analizi & PDF Fasikül", "💬 Müfredat Bilgi Asistanı"])
+
+@st.cache_data(ttl=60, show_spinner=False)
+def ollama_modelleri() -> list[str]:
+    yanit = requests.get(f"{OLLAMA_URL.rstrip('/')}/api/tags", timeout=4)
+    yanit.raise_for_status()
+    return sorted({
+        model["name"] for model in yanit.json().get("models", [])
+        if model.get("name") and model["name"].split(":")[0] != EMBED_MODEL.split(":")[0]
+        and "embed" not in model["name"].casefold()
+        and "bert" not in (model.get("details") or {}).get("family", "").casefold()
+    })
 
 
-# ---------------------------------------------------------------------------
-# TAB 1: GÖRSEL MATERYAL VE PDF FASİKÜL BORU HATTI
-# ---------------------------------------------------------------------------
-with tab_video:
-    st.markdown("#### 1. Ders Videosu Kaynağı")
-    kaynak_turu = st.radio("Kaynak Türü:", ["YouTube Linki", "Yerel MP4 Dosyası"], horizontal=True)
+@st.cache_data(ttl=300, show_spinner=False)
+def gemini_modelleri(api_key: str) -> list[str]:
+    modeller = set()
+    sayfa = None
+    while True:
+        parametreler = {"pageSize": 100}
+        if sayfa:
+            parametreler["pageToken"] = sayfa
+        yanit = requests.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            headers={"x-goog-api-key": api_key}, params=parametreler, timeout=6,
+        )
+        yanit.raise_for_status()
+        veri = yanit.json()
+        for model in veri.get("models", []):
+            ad = model["name"].removeprefix("models/")
+            if ad in GEMINI_SECENEKLERI and "generateContent" in model.get("supportedGenerationMethods", []):
+                modeller.add(ad)
+        sayfa = veri.get("nextPageToken")
+        if not sayfa:
+            return [ad for ad in GEMINI_SECENEKLERI if ad in modeller]
 
-    video_kaynagi = None
-    if kaynak_turu == "YouTube Linki":
-        yt_input = st.text_input("YouTube URL:", placeholder="Örn: https://www.youtube.com/watch?v=1EPox1m2MPQ")
-        if yt_input:
-            video_kaynagi = yt_input.strip()
-    else:
-        dosya = st.file_uploader("Yerel MP4 Dosyası Seçin:", type=["mp4", "mkv", "mov"])
-        if dosya:
-            icerik = dosya.getbuffer()
-            hedef = VIDEOS_DIR / sha256(icerik).hexdigest() / Path(dosya.name).name
-            hedef.parent.mkdir(parents=True, exist_ok=True)
-            if not hedef.is_file():
-                with NamedTemporaryFile(dir=hedef.parent, delete=False) as gecici:
-                    try:
-                        gecici.write(icerik)
-                        gecici.close()
-                        Path(gecici.name).replace(hedef)
-                    finally:
-                        gecici.close()
-                        Path(gecici.name).unlink(missing_ok=True)
-            video_kaynagi = str(hedef.resolve())
 
-    # Eğer önceden inmiş örnek video varsa pratik kullanım için öner
-    ornek_mevcut = ROOT_DIR / "temp_medya" / "video_1EPox1m2MPQ.mp4"
-    if not video_kaynagi and ornek_mevcut.exists():
-        if st.checkbox("💡 Test için sistemdeki mevcut Fen Bilimleri videosunu kullan", value=True):
-            video_kaynagi = str(ornek_mevcut.resolve())
+def video_yukle(dosya) -> str:
+    icerik = dosya.getbuffer()
+    hedef = VIDEOS_DIR / sha256(icerik).hexdigest() / PureWindowsPath(dosya.name).name
+    hedef.parent.mkdir(parents=True, exist_ok=True)
+    if not hedef.is_file():
+        with NamedTemporaryFile(dir=hedef.parent, delete=False) as gecici:
+            yol = Path(gecici.name)
+            try:
+                gecici.write(icerik)
+                gecici.close()
+                yol.replace(hedef)
+            finally:
+                gecici.close()
+                yol.unlink(missing_ok=True)
+    return str(hedef.resolve())
 
-    st.markdown("---")
-    anlatim_modeli = st.radio("Fasikül anlatım modeli", ["Ollama", "Gemini"], horizontal=True)
-    calistir_btn = st.button("🚀 Ekran Değişimlerini İncele ve PDF Ders Fasikülünü Bas", type="primary", use_container_width=True)
 
-    if calistir_btn:
-        if not video_kaynagi:
-            st.error("Lütfen bir video linki girin veya MP4 dosyası yükleyin!")
-        else:
-            with st.status("Görsel Materyal ve Ses Akışı İnceleniyor...", expanded=True) as status:
-                st.write("1️⃣ LangGraph: Niyet analizi yapılıyor ve 'pdf_isleme' boru hattı kuruluyor...")
-                st.write("2️⃣ Whisper ve video işleme: Konuşma, ders bölümleri ve ekran kareleri eşleştiriliyor...")
-                st.write("3️⃣ RAG: Her bölüm için seçilen sınıfın ders kitapları aranıyor...")
-                st.write("4️⃣ Bölüm analizi: Ders anlatımı ve önemli kavramlar hazırlanıyor...")
-                if soru_tercihi:
-                    st.write(f"5️⃣ Soru Motoru: {secilen_seviye} kademesine uygun sorular ve cevap anahtarı üretiliyor...")
-                st.write("📄 Ders fasikülü PDF olarak derleniyor...")
+def fasikul_uret(ayarlar: dict, *, tekrar: bool = False) -> None:
+    st.session_state.pop("yedek_karari", None)
+    st.session_state.pop("fasikul_hatasi", None)
+    model = ayarlar["gemini_modeli"] if ayarlar["anlatim_modeli"] == "gemini" else ayarlar["ollama_modeli"]
+    baslangic = "Ollama ile yeniden deneniyor" if tekrar else f"Üretim başlatılıyor · {model}"
+    with st.status(baslangic, expanded=True) as durum:
+        ilerleme_cubugu = st.progress(0.0)
 
-                core = EduFrameAgenticCore()
+        def ilerleme(dugum: str) -> None:
+            if dugum == "gemini_analiz":
+                deger, etiket = (0.80, "Değerlendirme soruları hazırlanıyor") if ayarlar["soru_eklensin_mi"] else (0.92, "PDF sayfaları hazırlanıyor")
+            else:
+                deger, etiket = ASAMALAR.get(dugum, (1.0, "PDF tamamlanıyor"))
+            ilerleme_cubugu.progress(deger)
+            durum.update(label=etiket)
+
+        try:
+            if ayarlar["anlatim_modeli"] == "ollama":
+                ollama_modelleri.clear()
                 try:
-                    sonuc_state = core.calistir(
-                        kullanici_girisi=f"{secilen_sinif} ders notunu çıkar",
-                        video_kaynagi=video_kaynagi,
-                        egitim_seviyesi=secilen_seviye,
-                        sinif_duzeyi=secilen_sinif,
-                        anlatim_modeli=anlatim_modeli.lower(),
-                        soru_eklensin_mi=soru_tercihi
-                    )
-                except (EksikDersKaresiHatasi, GeminiFasikulHatasi) as hata:
-                    status.update(label="Ders fasikülü üretilemedi", state="error", expanded=True)
-                    st.error(str(hata))
-                    st.stop()
-                status.update(label="Ders Fasikülü Başarıyla Üretildi!", state="complete", expanded=False)
+                    yerel = ollama_modelleri()
+                except (requests.RequestException, ValueError) as hata:
+                    raise OllamaFasikulHatasi("Ollama sunucusuna bağlanılamadı.") from hata
+                if model not in yerel:
+                    raise OllamaFasikulHatasi(f"{model} modeli Ollama’da bulunamadı.")
+            sonuc = EduFrameAgenticCore().calistir(
+                kullanici_girisi=f"{ayarlar['sinif_duzeyi']} ders notunu çıkar",
+                ollama_yedek_onayi_gerekli=True, ilerleme=ilerleme, **ayarlar,
+            )
+            pdf_yolu = sonuc.get("cikti_pdf_yolu")
+            if not pdf_yolu or not Path(pdf_yolu).is_file():
+                raise OSError(sonuc.get("hata") or "PDF dosyası oluşturulamadı.")
+        except OllamaFasikulHatasi as hata:
+            st.session_state["yedek_karari"] = {"ayarlar": ayarlar.copy(), "hata": str(hata)}
+            durum.update(label="Ollama çalıştırması durdu", state="error", expanded=False)
+            return
+        except (EksikDersKaresiHatasi, GeminiFasikulHatasi, OSError, RuntimeError) as hata:
+            durum.update(label="PDF üretilemedi", state="error", expanded=True)
+            st.session_state["fasikul_hatasi"] = str(hata)
+            return
+        st.session_state["fasikul_sonucu"] = sonuc
+        ilerleme_cubugu.progress(1.0)
+        durum.update(label="PDF hazır", state="complete", expanded=False)
 
-            # --- ÇIKTILARI GÖSTER ---
-            video_analizi = sonuc_state.get("video_analizi") or {}
-            bolumler = video_analizi.get("bolumler", [])
-            sorular = sonuc_state.get("sorular") or []
-            pdf_yolu = sonuc_state.get("cikti_pdf_yolu")
 
-            # İNDİRME ALANI
-            st.success(f"🎉 **{video_analizi.get('ders_adi', 'FEN BİLİMLERİ')} – {video_analizi.get('unite_basligi', 'Ders Notu')}**")
-            
-            if pdf_yolu and os.path.exists(pdf_yolu):
-                with open(pdf_yolu, "rb") as f:
-                    st.download_button(
-                        "📥 GERÇEK KURUMSAL PDF DERS FASİKÜLÜNÜ İNDİR (.PDF)",
-                        data=f.read(),
-                        file_name=Path(pdf_yolu).name,
-                        mime="application/pdf",
-                        type="primary",
-                        use_container_width=True
-                    )
+st.write("")
+tab_fasikul, tab_kitaplik = st.tabs(["Ders fasikülü", "MEB kitaplığında ara"])
+with tab_fasikul:
+    kaynak, ayar = st.columns([1.3, 1], gap="large")
+    with kaynak, st.container(border=True, key="video_kaynagi"):
+        st.subheader("Video kaynağı")
+        tur = st.radio("Video kaynağı", ["YouTube", "Bilgisayardan"], horizontal=True, label_visibility="collapsed")
+        baglanti = ""
+        dosya = None
+        if tur == "YouTube":
+            baglanti = st.text_input("YouTube bağlantısı", placeholder="https://www.youtube.com/watch?v=…").strip()
+        else:
+            st.caption("Videoyu aşağıdaki alana sürükleyip bırak veya bilgisayarından seç.")
+            dosya = st.file_uploader("Video dosyası", type=["mp4", "mkv", "mov", "webm", "avi"])
 
-            # GENEL ÖZET
-            if video_analizi.get("genel_ozet"):
-                st.info(f"**📌 Videonun Genel Konu Özeti:**\n\n{video_analizi.get('genel_ozet')}")
+    with ayar, st.container(border=True, key="fasikul_ayarlari"):
+        st.subheader("Fasikül ayarları")
+        sol, sag = st.columns(2)
+        seviye = sol.selectbox("Eğitim düzeyi", EGITIM_SEVIYELERI, filter_mode=None)
+        siniflar = SINIFLAR.get(seviye)
+        sinif = sag.selectbox("Sınıf", [f"{n}. Sınıf" for n in siniflar] if siniflar else ["Genel Lisans"],
+                               index=2 if seviye == "İlkokul" else 0, filter_mode=None, disabled=siniflar is None)
+        saglayici = st.radio("Model sağlayıcısı", ["Ollama", "Gemini"], horizontal=True)
+        secilen_ollama, secilen_gemini = OLLAMA_MODEL, VARSAYILAN_GEMINI
+        if saglayici == "Ollama":
+            try:
+                modeller = ollama_modelleri()
+            except (requests.RequestException, ValueError):
+                modeller = []
+                st.caption("Ollama şu anda erişilemiyor.")
+            if not modeller:
+                modeller = [OLLAMA_MODEL]
+            secilen_ollama = st.selectbox("Ollama modeli", modeller,
+                                          index=modeller.index(OLLAMA_MODEL) if OLLAMA_MODEL in modeller else 0,
+                                          filter_mode=None)
+        elif GEMINI_API_KEY:
+            try:
+                modeller = gemini_modelleri(GEMINI_API_KEY)
+            except (requests.RequestException, ValueError):
+                modeller = []
+                st.caption("Gemini model listesi alınamadı.")
+            secilen_gemini = st.selectbox(
+                "Gemini modeli", modeller, format_func=GEMINI_SECENEKLERI.__getitem__,
+                index=modeller.index(VARSAYILAN_GEMINI) if VARSAYILAN_GEMINI in modeller else 0 if modeller else None,
+                filter_mode=None, disabled=not modeller, placeholder="Kullanılabilir model bulunamadı" if not modeller else None,
+            )
+        else:
+            secilen_gemini = None
+            st.info("Gemini için API anahtarı ayarlanmalı.")
+        sorulari_ekle = st.checkbox("Değerlendirme sorularını ve cevap anahtarını ekle", value=True)
 
-            # GÖRSEL MATERYAL BÖLÜMLERİ
-            st.markdown("### 🖼️ Ekran Değişimlerine Göre Bölümlenmiş Materyaller")
+    if st.button("PDF oluştur", type="primary", use_container_width=True,
+                 disabled=not (dosya or baglanti) or (saglayici == "Gemini" and not secilen_gemini)):
+        try:
+            video = video_yukle(dosya) if dosya else baglanti
+        except OSError as hata:
+            st.error(f"Video kaydedilemedi. {hata}")
+        else:
+            fasikul_uret({
+                "video_kaynagi": video, "egitim_seviyesi": seviye, "sinif_duzeyi": sinif,
+                "anlatim_modeli": saglayici.lower(), "soru_eklensin_mi": sorulari_ekle,
+                "ollama_modeli": secilen_ollama, "gemini_modeli": secilen_gemini,
+            })
 
-            for idx, bolum in enumerate(bolumler, start=1):
-                b_baslik = bolum.get("bolum_basligi", f"Bölüm {idx}")
-                z_aralik = bolum.get("zaman_araligi_metni", "00:00 – 00:00")
+    if bekleyen := st.session_state.get("yedek_karari"):
+        with st.container(border=True, key="yedek_karari_kutusu"):
+            st.subheader("Gemini devreye girsin mi?")
+            st.warning(bekleyen["hata"])
+            st.caption(f"Evet seçilirse video {bekleyen['ayarlar']['gemini_modeli']} ile işlenir ve API kullanımı kotaya yansıyabilir.")
+            if not GEMINI_API_KEY:
+                st.caption("Gemini seçeneği için API anahtarı gerekli.")
+            evet, hayir = st.columns(2)
+            if evet.button("Evet, Gemini ile devam et", disabled=not GEMINI_API_KEY, use_container_width=True):
+                fasikul_uret({**bekleyen["ayarlar"], "anlatim_modeli": "gemini"})
+                st.rerun()
+            if hayir.button("Hayır, Ollama ile yeniden dene", use_container_width=True):
+                fasikul_uret(bekleyen["ayarlar"], tekrar=True)
+                st.rerun()
 
-                with st.expander(f"📁 {b_baslik}  |  ⏱️ {z_aralik}", expanded=True):
-                    # Ekran Görüntüsü
-                    kare_yolu = bolum.get("ekran_goruntusu_yolu")
-                    if kare_yolu and os.path.exists(kare_yolu) and os.path.getsize(kare_yolu) > 200:
-                        st.image(kare_yolu, caption=f"Ekrandaki Materyal (Zaman Aralığı: {z_aralik})", use_container_width=True)
+    if hata := st.session_state.get("fasikul_hatasi"):
+        st.error(hata)
 
-                    st.markdown("**1. Öğretmenin Anlatımı (Orijinal Transkript):**")
-                    transkript = escape(bolum.get("transkript") or "")
-                    st.markdown(f'<div class="box-transcript">"{transkript}"</div>', unsafe_allow_html=True)
-
-                    st.markdown(f"**2. Düzenlenmiş Konu Anlatımı ({secilen_sinif} Ders Kitabı Referanslı):**")
-                    anlatim = escape(bolum.get("duzenlenmis_anlatim") or "")
-                    st.markdown(f'<div class="box-pedagogical">{anlatim}</div>', unsafe_allow_html=True)
-                    if bolum.get("kitap_ek_bilgisi"):
-                        st.caption(f"Kitaptan ek bilgi: {bolum['kitap_ek_bilgisi']}")
-
-                    st.markdown("**3. Bölümün Önemli Kavramları ve Açıklamaları:**")
-                    kavramlar = bolum.get("onemli_kavramlar", [])
-                    if kavramlar:
-                        kavram_metin = "<br/>".join([f"• <b>{k.get('kavram')}:</b> {k.get('aciklama')}" for k in kavramlar])
-                        st.markdown(f'<div class="box-concept">{kavram_metin}</div>', unsafe_allow_html=True)
-
-                    if bolum.get("kitap_referansi"):
-                        st.caption(f"📚 {bolum.get('kitap_referansi')}")
-
-            # DEĞERLENDİRME VE TEST SORULARI
+    if sonuc := st.session_state.get("fasikul_sonucu"):
+        analiz = sonuc.get("video_analizi") or {}
+        bolumler = analiz.get("bolumler") or []
+        sorular = sonuc.get("sorular") or []
+        with st.container(border=True, key="fasikul_sonucu"):
+            st.subheader("Fasikül hazır")
+            st.caption(f"{analiz.get('sinif_duzeyi', '')} · {len(bolumler)} bölüm · {len(sorular)} değerlendirme sorusu")
+            indir, bas = st.columns(2)
+            pdf = Path(sonuc["cikti_pdf_yolu"])
+            if pdf.is_file():
+                indir.download_button("PDF’yi indir", data=pdf.read_bytes(), file_name=pdf.name,
+                                      mime="application/pdf", type="primary", use_container_width=True)
+            kayit = sonuc.get("icerik_kaydi_yolu")
+            cerceve = None
+            if kayit and re.fullmatch(r"[1-5]\.?\s*Sınıf", analiz.get("sinif_duzeyi") or ""):
+                dizin = ROOT / "templates" / "cerceveler"
+                if dizin.is_dir():
+                    adlar = sorted(p.name for p in dizin.iterdir()
+                                   if p.is_file() and p.suffix.lower() in {".jpeg", ".jpg", ".png"})
+                    if adlar:
+                        cerceve = bas.selectbox("Yeniden basım çerçevesi", [None, *adlar],
+                                                format_func=lambda ad: ad or "Kayıtlı çerçeve", filter_mode=None)
+            if kayit and bas.button("Kayıtlı içerikten yeniden bas", use_container_width=True):
+                try:
+                    yeniden = PDFGenerator().icerikten_yeniden_bas(Path(kayit), cerceve_adi=cerceve)
+                except (OSError, ValueError, EksikDersKaresiHatasi) as hata:
+                    st.error(f"PDF yeniden basılamadı. {hata}")
+                else:
+                    st.session_state["fasikul_sonucu"] = {**sonuc, "cikti_pdf_yolu": yeniden["pdf_path"]}
+                    st.rerun()
+            for i, bolum in enumerate(bolumler, 1):
+                with st.expander(f"{bolum.get('bolum_basligi') or f'Bölüm {i}'} · {bolum.get('zaman_araligi_metni', '')}"):
+                    if (kare := bolum.get("ekran_goruntusu_yolu")) and Path(kare).is_file():
+                        st.image(kare, use_container_width=True)
+                    st.markdown("**Orijinal transkript**")
+                    st.write(bolum.get("transkript") or "")
+                    st.markdown("**Ders anlatımı**")
+                    st.write(bolum.get("duzenlenmis_anlatim") or "")
+                    for kavram in bolum.get("onemli_kavramlar") or []:
+                        st.write(f"{kavram.get('kavram', '')} — {kavram.get('aciklama', '')}")
+                    if ek := bolum.get("kitap_ek_bilgisi"):
+                        st.caption(f"{ek} · {bolum.get('kitap_referansi', '')}")
             if sorular:
-                st.markdown("---")
-                st.markdown(f"### ❓ Değerlendirme ve Test Soruları ({secilen_seviye})")
-                for s_no, s in enumerate(sorular, start=1):
-                    with st.container():
-                        st.markdown(f"**Soru {s_no} [{s.get('tip')}]:** {s.get('soru')}")
-                        if s.get("secenekler"):
-                            for opt in s.get("secenekler"):
-                                st.write(f"&nbsp;&nbsp;&nbsp;&nbsp;{opt}")
-                        with st.expander(f"👁️ Soru {s_no} Çözüm ve Cevap Anahtarı"):
-                            st.write(f"**Doğru Cevap:** {s.get('dogru_cevap')}")
-                            st.write(f"**Açıklama:** {s.get('aciklama')}")
-                        st.markdown("---")
+                with st.expander("Değerlendirme ve cevap anahtarı"):
+                    for i, soru in enumerate(sorular, 1):
+                        st.markdown(f"**{i}. {soru.get('soru', '')}**")
+                        for secenek in soru.get("secenekler") or []:
+                            st.write(secenek)
+                        st.caption(f"Cevap {soru.get('dogru_cevap', '')} · {soru.get('aciklama', '')}")
 
-
-# ---------------------------------------------------------------------------
-# TAB 2: MÜFREDAT BİLGİ ASİSTANI
-# ---------------------------------------------------------------------------
-with tab_asistan:
-    st.markdown("#### 💬 Resmi Müfredat Ders Kitaplarında Arama")
-    st.caption("3-gram Türkçe Rerank, Gemma Tokenizer ve [K1],[K2] atıf doğrulama ile çalışır.")
-    soru_girdisi = st.text_input("Ders kitabına soru sorun:", placeholder="Örn: Elektrikli araçları kullanırken nelere dikkat edilmelidir?")
-    if st.button("🔍 Kitapta Ara"):
-        if soru_girdisi:
-            with st.spinner("Taranıyor..."):
-                core = EduFrameAgenticCore()
-                res = core.calistir(kullanici_girisi=soru_girdisi, egitim_seviyesi=secilen_seviye)
-                st.markdown(res.get("yanit_metni", "Bilgi bulunamadı."))
+with tab_kitaplik:
+    st.subheader("MEB kitaplığında ara")
+    with st.form("meb_arama"):
+        sorgu = st.text_input("Müfredat sorusu", placeholder="Elektrikli araçları kullanırken nelere dikkat etmeliyiz?")
+        ara = st.form_submit_button("Kitapta ara")
+    if ara and sorgu.strip():
+        with st.spinner("Kitaplık taranıyor"):
+            sonuc = EduFrameAgenticCore().calistir(
+                kullanici_girisi=sorgu.strip(), egitim_seviyesi=seviye, sinif_duzeyi=sinif,
+            )
+        st.markdown(sonuc.get("yanit_metni", "Bilgi bulunamadı."))

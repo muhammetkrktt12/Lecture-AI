@@ -187,6 +187,10 @@ class GeminiAnalyzer:
     def _api_anahtari_var_mi(self) -> bool:
         return bool(self.api_key and len(self.api_key.strip()) > 10 and not self.api_key.startswith("AIzaSyDummy"))
 
+    @property
+    def ollama_devre_disi(self) -> bool:
+        return self._ollama_devre_disi
+
     def _ollama_istem_adi(self, varsayilan: str, sonek: str = "") -> str:
         etiket = self.ollama_model.replace(":", "-")
         ad = f"{etiket}{sonek}"

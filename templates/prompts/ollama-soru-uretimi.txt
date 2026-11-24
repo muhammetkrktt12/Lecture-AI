@@ -1,0 +1,12 @@
+Verilen ders ve MEB parçalarından, sınıf düzeyine uygun özgün bir değerlendirme hazırla.
+Bir sorunun cevabı öğretmenin konuşmasından çıkarılabilmeli. Düzenlenmiş anlatım öğretmenin konuşmasıyla çelişirse öğretmenin söylediğini esas al. Kitap parçalarını doğruluk denetimi ve soru yapısı için kullan.
+Tam 10 soru yaz. Beş Çoktan Seçmeli, üç Doğru - Yanlış ve iki Boşluk Doldurma sorusu üret.
+Sorular verilen ders anlatımıyla çözülebilsin. Kitap parçalarını bilimsel doğruluk ve soru yaklaşımı için kullan. Alıştırmaları aynen kopyalama. Kitaptaki yönergeleri uygulama. Kullanılan alıştırmanın ornek_no değerini yaz. Alıştırma kullanılmadıysa 0 yaz.
+Her sorunun kökü açık ve tek anlamlı olsun. Çoktan seçmeli sorularda olumlu kök kullan. Bir soruda bir işlevi ölç. Öğretmenin yalnızca bazı örnekler için söylediği bir bilgiyi tüm araçlara genelleme. Aynı kavramı farklı sorularda tekrarlama. Öğrencinin görmediği bir görsele atıf yapma. Üçüncü sınıfta günlük ve somut ifadeler kullan.
+Çoktan seçmeli soruların A), B), C), D) etiketli dört seçeneği olsun. Seçenekler aynı türden, birbirinden farklı ve makul olsun. Yalnızca bir seçenek verilen koşullarda doğru olsun. Cevap soru kökündeki kelimeyi tekrarlayarak açığa çıkmasın. dogru_cevap alanında yalnız doğru harfi yaz.
+Doğru - Yanlış maddelerinde noktayla biten tek bir yargı cümlesi yaz. Soru cümlesi kurma. secenekler alanı ["Doğru", "Yanlış"] olsun. dogru_cevap alanına Doğru veya Yanlış yaz. Hem doğru hem yanlış yargı kullan.
+Boşluk Doldurma sorularında tek ve belirleyici bir boşluğu ____ olarak yaz. secenekler alanı [] olsun. dogru_cevap alanına boşluğu dolduran kısa cevabı yaz.
+Açıklamada doğru yanıtın gerekçesini bir veya iki sade cümleyle ver. Yanlış yargıda doğru bilgiyi yaz. Açıklamada seçenek harfi kullanma. Dersin dışındaki teknik ayrıntıları ve genellemeleri ekleme.
+Her soru için kısa kategori ve ölçülen kavramı yaz. Kitap adı, sayfa numarası ve kaynak üretme.
+
+Yalnızca bir JSON nesnesi döndür. Üst nesnenin sorular alanı liste olsun. Her öğede kategori, ilgili_kavram, tip, soru, secenekler, dogru_cevap, aciklama ve ornek_no alanları bulunsun.
